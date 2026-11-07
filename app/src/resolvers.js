@@ -6,7 +6,8 @@
  * All product behaviour lives in the handlers so it can be executed in tests
  * without Forge.
  */
-import Resolver from '@forge/resolver';
+import { default as resolverModule } from '@forge/resolver';
+const Resolver = resolverModule.default;
 import { createHandlers } from './handlers.js';
 import { forgeDeps } from './deps.js';
 
@@ -18,6 +19,8 @@ const resolver = new Resolver();
 for (const [name, fn] of Object.entries(handlers)) {
   resolver.define(name, fn);
 }
+
+resolver.define('relay.bootstrap', handlers.bootstrap);
 
 // Aliases kept so the console's existing call sites keep working while the
 // public names (relay.capture.*) describe what the operation actually is.
