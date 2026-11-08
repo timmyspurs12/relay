@@ -1,0 +1,79 @@
+/*
+ * Relay — design tokens (v2, "the ledger").
+ *
+ * Identity: a working document, not a dashboard. Paper on mineral canvas, a
+ * pine masthead, and ink stamps for state. Colour earns its place by encoding
+ * an operational fact; nothing is tinted for decoration.
+ */
+
+:root {
+  /* --- surfaces -------------------------------------------------------- */
+  --canvas: #e9eae3;
+  --paper: #fcfcf9;
+  --paper-sunk: #f4f4ee;
+  --paper-hover: #f2f3ec;
+
+  --ink: #14191b;
+  --ink-2: #3b4643;
+  --muted: #5c6561;
+
+  --rule: #d3d7ce;
+  --rule-strong: #b9bfb4;
+  --rule-faint: #e4e7df;
+
+  /* --- signal ---------------------------------------------------------- */
+  --pine: #1b3a33;          /* structure, primary action */
+  --pine-soft: #e3eae5;
+  --flame: #b33f14;         /* something is late or blocked — the only alarm */
+  --flame-soft: #fbeae2;
+  --verdigris: #196b55;     /* proven */
+  --verdigris-soft: #e2efe9;
+  --ochre: #7a5a0f;         /* a decision is owed */
+  --ochre-soft: #f6efd7;
+
+  /* --- type ------------------------------------------------------------ */
+  --sans: 'Schibsted Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+
+  --t-display: clamp(27px, 2.6vw, 38px);
+  --t-title: clamp(19px, 1.6vw, 23px);
+  --t-h2: 15px;
+  --t-body: 14px;
+  --t-small: 12.5px;
+  --t-micro: 11px;
+
+  /* --- space ----------------------------------------------------------- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 64px;
+
+  --gutter: clamp(16px, 3vw, 40px);
+  --maxw: 1400px;
+  --measure: 68ch;
+
+  --masthead-h: 60px;
+  --tabs-h: 46px;
+  --tabbar-h: 58px;
+
+  /* --- shape ----------------------------------------------------------- */
+  --r-xs: 2px;
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --shadow-sheet: 0 1px 2px rgba(20, 25, 27, 0.08), 0 24px 48px -28px rgba(20, 25, 27, 0.5);
+  --shadow-pop: 0 1px 2px rgba(20, 25, 27, 0.1), 0 16px 32px -20px rgba(20, 25, 27, 0.45);
+
+  --ease: cubic-bezier(0.22, 0.8, 0.2, 1);
+  --fast: 110ms;
+  --med: 170ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --fast: 0ms; --med: 0ms; }
+}
