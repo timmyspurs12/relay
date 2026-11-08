@@ -335,11 +335,20 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
       return { status: 'already_managed', state: MANAGED, record: await store.readLedger(key), steps, sync };
     }
 
-    // 1. the record exists, in `initializing`, before anything else is written
-    const init = await store.initialise(key, { state: INITIALIZING, seed: { source: 'track', trackedBy: context?.accountId ?? null } });
-    step('record_initialised', { created: init.created, rev: init.record.rev });
+    // 1. the record exists, in `initializing`, before anything else is written.
+    //
+    // This write is the one a first Track dies on, so it belongs inside the
+    // fail-closed block: a refusal here has to be logged and reported to the
+    // console with its platform code and trace id, not thrown past the caller
+    // where nothing records it. `hasRecord` is what the catch block restores —
+    // a record that was never created has no state to put back.
+    let hasRecord = false;
 
     try {
+      const init = await store.initialise(key, { state: INITIALIZING, seed: { source: 'track', trackedBy: context?.accountId ?? null } });
+      hasRecord = true;
+      step('record_initialised', { created: init.created, rev: init.record.rev });
+
       // 2. the condition must withhold while we work. Field first, because the
       // condition reads the field and nothing else.
       try {
@@ -428,21 +437,35 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
       };
     } catch (err) {
       // Fail closed: the record is (or becomes) `initializing`, and the field
-      // is left saying `initializing` if it was written at all.
-      try {
-        await store.setState(key, INITIALIZING, { attempts: 3 });
-      } catch (inner) {
-        log({ event: 'track_initializing_restore_failed', key, error: String(inner?.message ?? inner) });
+      // is left saying `initializing` if it was written at all. When the create
+      // itself was refused there is no record to move, so nothing is attempted.
+      if (hasRecord) {
+        try {
+          await store.setState(key, INITIALIZING, { attempts: 3 });
+        } catch (inner) {
+          log({ event: 'track_initializing_restore_failed', key, error: String(inner?.message ?? inner) });
+        }
       }
-      step('failed', { failedStage: err?.stage ?? 'unknown', error: String(err?.message ?? err) });
-      log({ event: 'track_failed', key, stage: err?.stage ?? 'unknown', error: String(err?.message ?? err) });
+      // Where it failed, why, and — when the store refused the write — what the
+      // platform called it. A `StorageRejected` carries the code, the HTTP
+      // status and the trace id, which is what makes a 422 attributable in the
+      // logs without a redeploy. Attribute names and types only; no values.
+      const stage = err?.stage ?? (hasRecord ? 'unknown' : 'record_initialise');
+      const failure = {
+        stage,
+        error: String(err?.message ?? err),
+        platformCode: err?.platformCode ?? null,
+        httpStatus: err?.status ?? null,
+        traceId: err?.traceId ?? null,
+      };
+      step('failed', { failedStage: stage, error: failure.error });
+      log({ event: 'track_failed', key, ...failure });
       return {
         status: 'failed',
         state: INITIALIZING,
-        stage: err?.stage ?? 'unknown',
-        error: String(err?.message ?? err),
+        ...failure,
         steps,
-        record: await store.readLedger(key).catch(() => null),
+        record: hasRecord ? await store.readLedger(key).catch(() => null) : null,
       };
     }
   }

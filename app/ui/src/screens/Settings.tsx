@@ -179,7 +179,7 @@ export function Settings({ workspace, onChange, toast, mode }: {
                               ? `${trackKey.trim()} is now managed: ${track.created?.length ?? 0} commitment(s) captured.`
                               : track.status === 'already_managed'
                                 ? `${trackKey.trim()} was already managed; its fields were re-verified.`
-                                : `${trackKey.trim()} could not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.`,
+                                : `${trackKey.trim()} could not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.${track.error ? ` ${track.error}` : ''}`,
                           );
                         } catch (err) {
                           toast(err instanceof Error ? err.message : String(err));

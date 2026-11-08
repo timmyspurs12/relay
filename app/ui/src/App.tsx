@@ -122,7 +122,7 @@ export function App() {
           ? `${key} is now managed — ${track.created?.length ?? 0} commitment(s) captured.`
           : track.status === 'already_managed'
             ? `${key} was already managed; its fields were re-verified.`
-            : `${key} did not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.`,
+            : `${key} did not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.${track.error ? ` ${track.error}` : ''}`,
         track.status === 'failed' ? 'overdue' : 'verified',
       );
     } catch (err) {

@@ -137,6 +137,10 @@ export type TrackResult = {
   state: ManagementState;
   stage?: string;
   error?: string;
+  /** What the platform called a refused write. `null` when nothing was refused. */
+  platformCode?: string | null;
+  httpStatus?: number | null;
+  traceId?: string | null;
   created?: { code: string; quote: string; confidence: number }[];
   duplicates?: number;
   steps: { stage: string; at: string; failedStage?: string; error?: string }[];
