@@ -1,0 +1,107 @@
+# Relay — continuous integration.
+#
+# Validation only. This workflow never deploys, installs, publishes or releases
+# the Forge app: no `forge deploy`, no `forge install`, no `forge lint` (which
+# requires an Atlassian login), no permissions beyond reading the repository,
+# and no secrets.
+#
+# Scope is narrower than the app it checks. It runs the same five commands that
+# were verified against the committed tree, in the same order, from the same
+# directories:
+#
+#   app/      npm test              backend unit tests (node --test)
+#   app/ui/   npx tsc -b            TypeScript project build
+#   app/ui/   npm run build         production UI build -> app/static/relay
+#   app/ui/   npm run check:render  renders every screen and asserts content
+#   app/      npm run check:manifest  offline Forge manifest validation
+#
+# Order is load-bearing: `check:manifest` validates the manifest against
+# @forge/manifest's schema, which requires every referenced resource to exist on
+# disk. `resources[0].path` is `static/relay`, which is build output written by
+# `npm run build` in app/ui (vite outDir `../static/relay`) and is gitignored, so
+# the manifest check must run after the UI build or it fails with
+# "missing resource 'static/relay'".
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Read-only token. Nothing here writes to the repository, its packages or its
+# releases, so nothing needs more.
+permissions:
+  contents: read
+
+# One run per ref: a force-push or a quick second commit supersedes the run it
+# made obsolete instead of queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    # Pinned rather than `ubuntu-latest` so the runner image cannot change under
+    # the job without a visible edit. 24.04 is a current stable GitHub-hosted image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # Node 22 because app/manifest.yml declares `app.runtime.name: nodejs22.x`
+      # and both lockfiles are lockfileVersion 3 (npm 10, the npm bundled with
+      # Node 22). 22 is an LTS line.
+      #
+      # This is the *project* toolchain. Both actions run on the runner's own
+      # node24 action runtime (checkout v7 and setup-node v7 are node24 actions,
+      # needing runner v2.327.1+); that is the machinery that executes the YAML,
+      # not the Node the app is built and tested with.
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          # Two independent dependency trees, two lockfiles: cache keys cover both.
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/ui/package-lock.json
+
+      # `npm ci` needs a lockfile in the directory it runs in, and each tree has
+      # its own: app/package-lock.json and app/ui/package-lock.json. They are
+      # installed separately, from their own directories, exactly as the scripts
+      # expect (`npm --prefix ui run build` in forge:deploy, `../static/relay`
+      # as vite's outDir).
+      - name: Install backend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Install UI dependencies
+        working-directory: app/ui
+        run: npm ci
+
+      - name: Run backend tests
+        working-directory: app
+        run: npm test
+
+      - name: Typecheck UI (tsc -b)
+        working-directory: app/ui
+        run: npx tsc -b
+
+      - name: Build UI for production
+        working-directory: app/ui
+        run: npm run build
+
+      - name: Check UI renders every screen
+        working-directory: app/ui
+        run: npm run check:render
+
+      - name: Validate Forge manifest
+        working-directory: app
+        run: npm run check:manifest
