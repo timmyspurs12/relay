@@ -23,6 +23,11 @@ type Invoker = (name: string, payload?: unknown) => Promise<unknown>;
 
 let invokeRemote: Invoker | null = null;
 
+export type PanelContext = {
+  panelIssue: string | null;
+  panelTracked: boolean | null;
+};
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     p,
@@ -45,7 +50,10 @@ function insideAtlassian(): boolean {
  * outside Forge (the Vite preview and the screenshot pass), and it throws
  * inside Forge so the console can say what is wrong.
  */
-async function connectBridge(): Promise<{ invoke: Invoker; workspace: Workspace } | { invoke: null; reason: 'outside_forge' }> {
+async function connectBridge(): Promise<
+  | { invoke: Invoker; workspace: Workspace; panelIssue: string | null; panelTracked: boolean | null }
+  | { invoke: null; reason: 'outside_forge' }
+> {
   if (!insideAtlassian()) return { invoke: null, reason: 'outside_forge' };
 
   let bridge: typeof import('@forge/bridge');
@@ -63,8 +71,21 @@ async function connectBridge(): Promise<{ invoke: Invoker; workspace: Workspace 
     if (!res || typeof res !== 'object' || !('workspace' in (res as object))) {
       throw new Error('The bootstrap resolver returned no workspace.');
     }
-    store = (res as { workspace: Workspace }).workspace;
-    return { invoke: bridge.invoke as Invoker, workspace: store };
+
+    const bootstrap = res as {
+      workspace: Workspace;
+      panelIssue?: string | null;
+      panelTracked?: boolean | null;
+    };
+
+    store = bootstrap.workspace;
+
+    return {
+      invoke: bridge.invoke as Invoker,
+      workspace: store,
+      panelIssue: bootstrap.panelIssue ?? null,
+      panelTracked: bootstrap.panelTracked ?? null,
+    };
   } catch (err) {
     throw new Error(`Relay could not read the workspace from Jira: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -189,15 +210,32 @@ export type EnforcementCheck = {
 };
 
 export const api = {
-  async bootstrap(): Promise<{ workspace: Workspace; mode: DataMode }> {
+  async bootstrap(): Promise<{
+    workspace: Workspace;
+    mode: DataMode;
+    panelIssue: string | null;
+    panelTracked: boolean | null;
+  }> {
     const conn = await connectBridge();
+
     if (conn.invoke) {
       invokeRemote = conn.invoke;
       mode = 'live';
-      return { workspace: clone(conn.workspace), mode };
+      return {
+        workspace: clone(conn.workspace),
+        mode,
+        panelIssue: conn.panelIssue,
+        panelTracked: conn.panelTracked,
+      };
     }
+
     mode = 'fixture';
-    return { workspace: clone(store), mode };
+    return {
+      workspace: clone(store),
+      mode,
+      panelIssue: null,
+      panelTracked: null,
+    };
   },
 
   async accept(key: string, code: string, ownerId: string, dueAt: string | null): Promise<Issue> {

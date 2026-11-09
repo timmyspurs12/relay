@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { DataMode, Workspace } from './lib/types';
-import { api } from './lib/api';
+import { api, type TrackResult } from './lib/api';
 import { Icon, type IconName } from './components/Icons';
 import { Button, Empty, Notice, OwnerStamp, Skeleton, Stamp } from './components/primitives';
 import { CommandPalette, Sheet, Toasts, type Command, type Toast } from './components/overlays';
@@ -31,6 +31,10 @@ export function App() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
+  // Set only when Forge opened Relay inside a Jira issue panel. The global page
+  // has no issue of its own, so both stay null there.
+  const [panelIssue, setPanelIssue] = useState<string | null>(null);
+  const [panelTracked, setPanelTracked] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,7 +42,16 @@ export function App() {
       if (cancelled) return;
       setWorkspace(res.workspace);
       setMode(res.mode);
-      setCaseKey((k) => k || res.workspace.issues[0]?.key || '');
+      setPanelIssue(res.panelIssue);
+      setPanelTracked(res.panelTracked);
+      if (res.panelIssue) {
+        // Opened inside an issue panel: the route is that issue, and only that issue.
+        setCaseKey(res.panelIssue);
+        setRoute('case');
+      } else {
+        // The global page keeps its existing overview landing.
+        setCaseKey((k) => k || res.workspace.issues[0]?.key || '');
+      }
     }).catch((err: unknown) => {
       if (cancelled) return;
       setBootError(err instanceof Error ? err.message : String(err));
@@ -113,7 +126,7 @@ export function App() {
   }, [replaceIssue, toast]);
 
   /** Run the management lifecycle. The server decides the outcome; we report it. */
-  const trackIssue = useCallback(async (key: string) => {
+  const trackIssue = useCallback(async (key: string): Promise<TrackResult | null> => {
     try {
       const { workspace: next, track } = await api.track(key);
       setWorkspace(next);
@@ -125,10 +138,17 @@ export function App() {
             : `${key} did not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.${track.error ? ` ${track.error}` : ''}`,
         track.status === 'failed' ? 'overdue' : 'verified',
       );
+      return track;
     } catch (err) {
       toast(`Track failed: ${err instanceof Error ? err.message : String(err)}`, 'overdue');
+      return null;
     }
   }, [toast]);
+
+  // `ScreenProps.onTrack` is void-shaped; the panel needs the outcome, so it
+  // receives `trackIssue` itself and the screens receive this adapter. One
+  // implementation, two shapes.
+  const requestTrack = useCallback((key: string) => { void trackIssue(key); }, [trackIssue]);
 
   /** Offboarding, already confirmed by the caller. */
   const untrackIssue = useCallback(async (key: string, reason: string) => {
@@ -173,7 +193,9 @@ export function App() {
     return [...base, ...cases, ...commitments];
   }, [workspace, openCase, openCommitment]);
 
-  const currentIssue = workspace?.issues.find((i) => i.key === caseKey) ?? workspace?.issues[0];
+  // Exactly the requested issue, or nothing. Relay never shows another case in
+  // place of the one that was asked for.
+  const currentIssue = workspace?.issues.find((i) => i.key === caseKey);
   const drawerIssue = workspace?.issues.find((i) => i.key === drawer?.issueKey);
   const drawerCommitment = drawerIssue?.commitments.find((c) => c.code === drawer?.code);
 
@@ -251,7 +273,7 @@ export function App() {
               toast={toast}
               onNavigate={go}
               onScan={scanIssue}
-              onTrack={trackIssue}
+              onTrack={requestTrack}
               onUntrack={untrackIssue}
               onAccept={async (k, code, ownerId, dueAt) => {
                 replaceIssue(await api.accept(k, code, ownerId, dueAt));
@@ -263,7 +285,9 @@ export function App() {
               }}
             />
           )}
-          {route === 'case' && currentIssue && (
+          {route === 'case' && (panelIssue && !currentIssue ? (
+            <PanelIssue issueKey={panelIssue} tracked={panelTracked} onTrack={trackIssue} />
+          ) : currentIssue ? (
             <CaseWorkspace
               workspace={workspace}
               issueKey={currentIssue.key}
@@ -272,8 +296,20 @@ export function App() {
               toast={toast}
               onNavigate={go}
               onScan={scanIssue}
+              onTrack={requestTrack}
+              onUntrack={untrackIssue}
             />
-          )}
+          ) : (
+            <div className="wrap wrap--narrow">
+              <div className="page" style={{ marginTop: 26 }}>
+                <Empty
+                  title="That case is not in the ledger"
+                  text={`Relay has no record for ${caseKey || 'that issue'}, so there is nothing to show — and another case is never shown in its place.`}
+                  action={<Button onClick={() => go('overview')}>Back to the ledger</Button>}
+                />
+              </div>
+            </div>
+          ))}
           {route === 'activity' && <Activity workspace={workspace} onOpenCase={openCase} onOpenCommitment={openCommitment} toast={toast} onNavigate={go} />}
           {route === 'settings' && <Settings workspace={workspace} onChange={setWorkspace} toast={toast} mode={mode} />}
         </main>
@@ -362,6 +398,85 @@ function Baton() {
       <rect x="1.2" y="5.8" width="11.6" height="2.4" rx="1.2" fill="currentColor" opacity=".95" />
       <path d="M4.4 8.2V3.1M9.6 8.2V3.1" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" opacity=".55" />
     </svg>
+  );
+}
+
+/**
+ * The issue panel when Relay holds no record of the issue it is mounted in.
+ *
+ * This is a state of *this* issue, never a stand-in for another one: no case,
+ * no commitments and no management state are invented here. The action is the
+ * existing lifecycle (`relay.workspace.track`, through `trackIssue`) — when it
+ * succeeds the workspace gains the record and this panel is replaced by the
+ * case itself; when it does not, the server's own reason is shown and the
+ * issue is explicitly still untracked and withheld.
+ */
+function PanelIssue({ issueKey, tracked, onTrack }: {
+  issueKey: string;
+  tracked: boolean | null;
+  onTrack: (key: string) => Promise<TrackResult | null>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const track = async () => {
+    setBusy(true);
+    setFailure(null);
+    const result = await onTrack(issueKey);
+    setBusy(false);
+    // `null` means the call itself threw; the toast has reported that, and the
+    // issue is still untracked either way, so this panel stays where it is.
+    if (result && result.status !== 'managed' && result.status !== 'already_managed') {
+      setFailure(result.error ?? `${issueKey} did not finish (${result.stage ?? 'unknown'}) and stays withheld.`);
+    }
+  };
+
+  return (
+    <div className="wrap wrap--narrow">
+      <div className="page" style={{ marginTop: 26 }}>
+        {tracked ? (
+          <Notice tone="warn">
+            Relay reports {issueKey} as managed, but no record for it came back with the workspace, so there is
+            nothing here that can be shown safely. Reload the page to read it again — Relay will not put another
+            case in its place.
+          </Notice>
+        ) : (
+          <>
+            <div className="masthead-line">
+              <div>
+                <div className="masthead-line__date">{issueKey} · issue panel</div>
+                <h1 className="page-title">This issue is not in the ledger yet</h1>
+                <p className="page-lede">
+                  Relay holds no record for {issueKey}, so it has no commitments, no owner and no closure state to
+                  show. Tracking reads the issue and its comments once and records it; it never overwrites a record
+                  that already exists.
+                </p>
+              </div>
+            </div>
+
+            {failure && (
+              <div style={{ marginTop: 18 }}>
+                <Notice tone="danger">{failure}</Notice>
+              </div>
+            )}
+
+            <div style={{ marginTop: 22 }}>
+              <Empty
+                title={busy ? `Tracking ${issueKey}…` : `Track ${issueKey}`}
+                text={busy
+                  ? 'Reading the issue and its comments.'
+                  : 'Nothing is claimed about this case until Relay has actually read it. The issue stays withheld until tracking completes.'}
+                action={(
+                  <Button variant="primary" icon="sync" onClick={() => void track()} disabled={busy}>
+                    {busy ? 'Tracking…' : 'Track this issue'}
+                  </Button>
+                )}
+              />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

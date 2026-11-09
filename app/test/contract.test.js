@@ -243,3 +243,78 @@ test('the field is written through the private app-field API and never through E
   assert.match(src, /\/rest\/api\/3\/app\/field\/\$\{fieldIdOrKey\}\/value/);
   assert.match(src, /'PUT'|method: 'PUT'/);
 });
+
+test('searchIssuesPage uses the enhanced JQL endpoint and preserves cursor pagination', async () => {
+  const requestedUrls = [];
+  const cursor = 'eyJvZmZzZXQiOjI1fQ==';
+  const responses = [
+    {
+      issues: [{ key: 'FS-1' }],
+      nextPageToken: cursor,
+      isLast: false,
+    },
+    {
+      issues: [{ key: 'FS-2' }],
+      nextPageToken: 'must-not-be-returned',
+      isLast: true,
+    },
+  ];
+
+  const api = createJira({
+    requestJira: async (request) => {
+      requestedUrls.push(String(request));
+      const body = responses.shift();
+      assert.ok(body, 'there must be a mocked response for every request');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      };
+    },
+    route: (strings, ...values) => strings.reduce((result, part, index) => {
+      const value = values[index];
+      return result + part + (
+        value instanceof URLSearchParams ? value.toString() : (value ?? '')
+      );
+    }, ''),
+  });
+
+  const jql = 'project = "FS" ORDER BY key ASC';
+
+  const first = await api.searchIssuesPage(jql, { maxResults: 25 });
+
+  assert.deepEqual(first.keys, ['FS-1']);
+  assert.equal(first.nextPageToken, cursor);
+  assert.equal(first.isLast, false);
+
+  const second = await api.searchIssuesPage(jql, {
+    maxResults: 25,
+    pageToken: first.nextPageToken,
+  });
+
+  assert.deepEqual(second.keys, ['FS-2']);
+  assert.equal(second.nextPageToken, null);
+  assert.equal(second.isLast, true);
+
+  assert.equal(requestedUrls.length, 2);
+
+  const firstUrl = new URL(requestedUrls[0], 'https://relay.test');
+  const secondUrl = new URL(requestedUrls[1], 'https://relay.test');
+
+  for (const url of [firstUrl, secondUrl]) {
+    assert.equal(url.pathname, '/rest/api/3/search/jql');
+    assert.equal(url.searchParams.get('jql'), jql);
+    assert.equal(url.searchParams.get('maxResults'), '25');
+    assert.equal(url.searchParams.get('fields'), 'key');
+  }
+
+  assert.equal(firstUrl.searchParams.has('nextPageToken'), false);
+  assert.equal(secondUrl.searchParams.get('nextPageToken'), cursor);
+
+  assert.ok(
+    requestedUrls.every((url) => !url.includes('/rest/api/3/search?')),
+    'the removed search endpoint must never be called',
+  );
+  assert.equal(responses.length, 0, 'both mocked pages must be consumed');
+});
