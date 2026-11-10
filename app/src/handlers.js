@@ -157,6 +157,86 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
   }
 
   /**
+   * Does Relay hold a record for *this* issue?
+   *
+   * The console's Cases list is built from the tracked list, which is a curated
+   * *selection* of the issues Relay manages — not an index of the records that
+   * exist. A backfilled or trigger-created record is deliberately absent from
+   * it. Answering "is there a record?" from the workspace therefore confuses
+   * "managed and listed" with "recorded", and an existing `unmanaged` record
+   * gets reported as no record at all.
+   *
+   * This asks the entity store directly, by the record's own key: one point
+   * read (`store.readLedger` → `records.read`), and nothing else. It does not
+   * capture, create, promote, bump a revision, or touch a Jira property or
+   * field. A record that does not exist stays non-existent.
+   *
+   * `status` is the only thing a caller may branch on. `missing` means the
+   * store answered "no such key"; `error` means it could not answer. Collapsing
+   * those two is precisely how "Relay holds no record" gets shown for a record
+   * that exists, so they are never collapsed here.
+   */
+  async function readPanelRecord(key) {
+    const base = {
+      key: key ?? null,
+      status: 'missing',
+      state: null,
+      rev: null,
+      updatedAt: null,
+      open: null,
+      inTrackedList: null,
+      error: null,
+    };
+
+    if (!key) return { ...base, status: 'error', error: 'issue_key_required' };
+
+    let record;
+    try {
+      record = await store.readLedger(key);
+    } catch (err) {
+      log({ event: 'panel_record_read_failed', issueKey: key, error: String(err?.message ?? err) });
+      return { ...base, status: 'error', error: String(err?.message ?? err) };
+    }
+
+    // Reported for diagnostics only. This list is a selection: `false` here
+    // never means "no record", and no caller may infer existence from it.
+    let inTrackedList = null;
+    try {
+      inTrackedList = (await store.tracked()).some((t) => t.key === key);
+    } catch (err) {
+      log({ event: 'panel_tracked_list_unreadable', issueKey: key, error: String(err?.message ?? err) });
+    }
+
+    if (!record) return { ...base, inTrackedList };
+
+    let open = null;
+    try {
+      open = counts(record, now().getTime()).open;
+    } catch (err) {
+      log({ event: 'panel_record_counts_failed', issueKey: key, error: String(err?.message ?? err) });
+    }
+
+    const status = record.state === MANAGED
+      ? 'managed'
+      : record.state === UNMANAGED
+        ? 'unmanaged'
+        : record.state === INITIALIZING
+          ? 'initializing'
+          : 'unknown-state';
+
+    return {
+      key,
+      status,
+      state: record.state ?? null,
+      rev: record.rev ?? null,
+      updatedAt: record.updatedAt ?? null,
+      open,
+      inTrackedList,
+      error: null,
+    };
+  }
+
+  /**
    * Apply a change to one commitment.
    *
    * Ordering (see sync.js): guard projection → ledger → projection + fields.
@@ -554,15 +634,32 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
       // Merely opening the panel never changes management state: an issue with
       // no record stays unknown (withheld) until Track or Backfill records it.
       const built = await buildWorkspace({ jira, store, settings, context, now: now(), log, field: fields });
+      // The panel's issue is answered from the record itself, not from the
+      // tracked-based workspace: an `unmanaged` record is a record, and it is
+      // not in that list. `panelTracked` is kept for callers that ask about the
+      // list, and is list membership only — never existence.
+      const panelRecord = panelIssue ? await readPanelRecord(panelIssue) : null;
       return {
         workspace: built.workspace,
         mode: 'live',
         panelIssue: panelIssue ?? null,
-        panelTracked: panelIssue ? (await store.tracked()).some((t) => t.key === panelIssue) : null,
+        // Taken from the lookup that already happened. Reading the tracked list
+        // a second time here would be a duplicate call, and an unguarded one:
+        // it would let a list failure fail the whole bootstrap after the record
+        // itself had already been read successfully. `inTrackedList` is
+        // `null` when the list could not be read, and stays `null` here.
+        panelTracked: panelRecord ? panelRecord.inTrackedList : null,
+        panelRecord,
       };
     },
 
     'relay.issue.get': async ({ payload }) => readBack(payload.key),
+
+    /**
+     * The issue panel's point lookup, on its own so a failed read can be
+     * retried without rebuilding the whole workspace. Read-only.
+     */
+    'relay.issue.record': async ({ payload }) => readPanelRecord(payload?.key),
 
     /* ---------------------------------------------------- management lifecycle */
 
