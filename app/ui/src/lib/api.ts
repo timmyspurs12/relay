@@ -37,6 +37,55 @@ function insideAtlassian(): boolean {
 }
 
 /**
+ * The panel's direct point lookup of its own issue (`relay.issue.record`).
+ *
+ * `status` is the only discriminator that may be branched on:
+ *
+ *   * `managed` / `unmanaged` / `initializing` / `unknown-state` — a record
+ *     exists and this is what it says;
+ *   * `missing` — the store answered "no such key". Relay genuinely holds no
+ *     record;
+ *   * `error` — the store could not answer. **Not** an absence.
+ *
+ * `inTrackedList` is list membership, reported for diagnostics only. It is a
+ * curated selection of managed issues, not an index of records: `false` there
+ * never means "no record".
+ */
+export type PanelRecord = {
+  key: string | null;
+  status: 'managed' | 'unmanaged' | 'initializing' | 'unknown-state' | 'missing' | 'error';
+  /**
+   * The record's own state as stored. Deliberately `string`, not
+   * `ManagementState`: `unknown-state` exists precisely because a record can
+   * carry a value this console has no model for, and typing it narrowly would
+   * put a lie in the type rather than a warning on the screen.
+   */
+  state: string | null;
+  rev: number | null;
+  updatedAt: string | null;
+  open: number | null;
+  inTrackedList: boolean | null;
+  error: string | null;
+};
+
+/**
+ * What `relay.bootstrap` returns. `panelIssue` is the key of the Jira issue the
+ * panel is mounted in — Forge fills `context.extension.issue` for a
+ * `jira:issuePanel` invocation and leaves it out on the global page.
+ *
+ * `panelRecord` is the direct lookup and the only thing the panel uses to decide
+ * whether a record exists. `panelTracked` is retained for callers that ask about
+ * the tracked list; it is membership, not existence, and must not be used to
+ * decide whether Relay holds a record.
+ */
+type BootstrapPayload = {
+  workspace: Workspace;
+  panelIssue?: string | null;
+  panelTracked?: boolean | null;
+  panelRecord?: PanelRecord | null;
+};
+
+/**
  * Connect to the Forge bridge.
  *
  * Inside Forge, a failing bridge is an **error**, not a reason to show fixture
@@ -45,7 +94,10 @@ function insideAtlassian(): boolean {
  * outside Forge (the Vite preview and the screenshot pass), and it throws
  * inside Forge so the console can say what is wrong.
  */
-async function connectBridge(): Promise<{ invoke: Invoker; workspace: Workspace } | { invoke: null; reason: 'outside_forge' }> {
+async function connectBridge(): Promise<
+  | { invoke: Invoker; workspace: Workspace; panelIssue: string | null; panelTracked: boolean | null; panelRecord: PanelRecord | null }
+  | { invoke: null; reason: 'outside_forge' }
+> {
   if (!insideAtlassian()) return { invoke: null, reason: 'outside_forge' };
 
   let bridge: typeof import('@forge/bridge');
@@ -63,8 +115,19 @@ async function connectBridge(): Promise<{ invoke: Invoker; workspace: Workspace 
     if (!res || typeof res !== 'object' || !('workspace' in (res as object))) {
       throw new Error('The bootstrap resolver returned no workspace.');
     }
-    store = (res as { workspace: Workspace }).workspace;
-    return { invoke: bridge.invoke as Invoker, workspace: store };
+    const payload = res as BootstrapPayload;
+    store = payload.workspace;
+    return {
+      invoke: bridge.invoke as Invoker,
+      workspace: store,
+      // The panel's issue travels with the workspace; the console decides where
+      // to open. Null on the global page, which has no issue of its own.
+      panelIssue: payload.panelIssue ?? null,
+      panelTracked: payload.panelTracked ?? null,
+      // Absent on an older backend: the panel then reports that it could not
+      // read the record rather than assuming there is none.
+      panelRecord: payload.panelRecord ?? null,
+    };
   } catch (err) {
     throw new Error(`Relay could not read the workspace from Jira: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -189,15 +252,51 @@ export type EnforcementCheck = {
 };
 
 export const api = {
-  async bootstrap(): Promise<{ workspace: Workspace; mode: DataMode }> {
+  async bootstrap(): Promise<{
+    workspace: Workspace;
+    mode: DataMode;
+    /** The issue this panel is mounted in; null when Relay opened as the global page. */
+    panelIssue: string | null;
+    /**
+     * Whether that issue is in the tracked list — selection, not existence.
+     * Null without a panel issue.
+     */
+    panelTracked: boolean | null;
+    /** The direct record lookup for that issue. Null without a panel issue. */
+    panelRecord: PanelRecord | null;
+  }> {
     const conn = await connectBridge();
     if (conn.invoke) {
       invokeRemote = conn.invoke;
       mode = 'live';
-      return { workspace: clone(conn.workspace), mode };
+      return {
+        workspace: clone(conn.workspace),
+        mode,
+        panelIssue: conn.panelIssue,
+        panelTracked: conn.panelTracked,
+        panelRecord: conn.panelRecord,
+      };
     }
     mode = 'fixture';
-    return { workspace: clone(store), mode };
+    return { workspace: clone(store), mode, panelIssue: null, panelTracked: null, panelRecord: null };
+  },
+
+  /**
+   * Re-read the panel's own record. Read-only: it exists so a failed lookup can
+   * be retried without rebuilding the workspace, and it never changes state.
+   */
+  async issueRecord(key: string): Promise<PanelRecord> {
+    if (invokeRemote) return (await invokeRemote('relay.issue.record', { key })) as PanelRecord;
+    return {
+      key,
+      status: 'error',
+      state: null,
+      rev: null,
+      updatedAt: null,
+      open: null,
+      inTrackedList: null,
+      error: 'Fixture mode: reading the Relay record needs the Forge bridge.',
+    };
   },
 
   async accept(key: string, code: string, ownerId: string, dueAt: string | null): Promise<Issue> {

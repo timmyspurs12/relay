@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { DataMode, Workspace } from './lib/types';
-import { api } from './lib/api';
+import { api, type PanelRecord, type TrackResult } from './lib/api';
 import { Icon, type IconName } from './components/Icons';
 import { Button, Empty, Notice, OwnerStamp, Skeleton, Stamp } from './components/primitives';
 import { CommandPalette, Sheet, Toasts, type Command, type Toast } from './components/overlays';
@@ -31,6 +31,12 @@ export function App() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
+  // Set only when Forge opened Relay inside a Jira issue panel. The global page
+  // has no issue of its own, so both stay null there.
+  const [panelIssue, setPanelIssue] = useState<string | null>(null);
+  // The panel's own record, read by key. Deliberately not the tracked list:
+  // an unmanaged record is a record, and it is not in that list.
+  const [panelRecord, setPanelRecord] = useState<PanelRecord | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,7 +44,16 @@ export function App() {
       if (cancelled) return;
       setWorkspace(res.workspace);
       setMode(res.mode);
-      setCaseKey((k) => k || res.workspace.issues[0]?.key || '');
+      setPanelIssue(res.panelIssue);
+      setPanelRecord(res.panelRecord);
+      if (res.panelIssue) {
+        // Opened inside an issue panel: the route is that issue, and only that issue.
+        setCaseKey(res.panelIssue);
+        setRoute('case');
+      } else {
+        // The global page keeps its existing overview landing.
+        setCaseKey((k) => k || res.workspace.issues[0]?.key || '');
+      }
     }).catch((err: unknown) => {
       if (cancelled) return;
       setBootError(err instanceof Error ? err.message : String(err));
@@ -113,7 +128,7 @@ export function App() {
   }, [replaceIssue, toast]);
 
   /** Run the management lifecycle. The server decides the outcome; we report it. */
-  const trackIssue = useCallback(async (key: string) => {
+  const trackIssue = useCallback(async (key: string): Promise<TrackResult | null> => {
     try {
       const { workspace: next, track } = await api.track(key);
       setWorkspace(next);
@@ -125,10 +140,17 @@ export function App() {
             : `${key} did not finish (${track.stage ?? 'unknown'}). It stays withheld until track completes.${track.error ? ` ${track.error}` : ''}`,
         track.status === 'failed' ? 'overdue' : 'verified',
       );
+      return track;
     } catch (err) {
       toast(`Track failed: ${err instanceof Error ? err.message : String(err)}`, 'overdue');
+      return null;
     }
   }, [toast]);
+
+  // `ScreenProps.onTrack` is void-shaped; the panel needs the outcome, so it
+  // receives `trackIssue` itself and the screens receive this adapter. One
+  // implementation, two shapes.
+  const requestTrack = useCallback((key: string) => { void trackIssue(key); }, [trackIssue]);
 
   /** Offboarding, already confirmed by the caller. */
   const untrackIssue = useCallback(async (key: string, reason: string) => {
@@ -173,7 +195,9 @@ export function App() {
     return [...base, ...cases, ...commitments];
   }, [workspace, openCase, openCommitment]);
 
-  const currentIssue = workspace?.issues.find((i) => i.key === caseKey) ?? workspace?.issues[0];
+  // Exactly the requested issue, or nothing. Relay never shows another case in
+  // place of the one that was asked for.
+  const currentIssue = workspace?.issues.find((i) => i.key === caseKey);
   const drawerIssue = workspace?.issues.find((i) => i.key === drawer?.issueKey);
   const drawerCommitment = drawerIssue?.commitments.find((c) => c.code === drawer?.code);
 
@@ -251,7 +275,7 @@ export function App() {
               toast={toast}
               onNavigate={go}
               onScan={scanIssue}
-              onTrack={trackIssue}
+              onTrack={requestTrack}
               onUntrack={untrackIssue}
               onAccept={async (k, code, ownerId, dueAt) => {
                 replaceIssue(await api.accept(k, code, ownerId, dueAt));
@@ -263,7 +287,9 @@ export function App() {
               }}
             />
           )}
-          {route === 'case' && currentIssue && (
+          {route === 'case' && (panelIssue && !currentIssue ? (
+            <PanelIssue issueKey={panelIssue} record={panelRecord} onTrack={trackIssue} />
+          ) : currentIssue ? (
             <CaseWorkspace
               workspace={workspace}
               issueKey={currentIssue.key}
@@ -272,8 +298,20 @@ export function App() {
               toast={toast}
               onNavigate={go}
               onScan={scanIssue}
+              onTrack={requestTrack}
+              onUntrack={untrackIssue}
             />
-          )}
+          ) : (
+            <div className="wrap wrap--narrow">
+              <div className="page" style={{ marginTop: 26 }}>
+                <Empty
+                  title="That case is not in the ledger"
+                  text={`Relay has no record for ${caseKey || 'that issue'}, so there is nothing to show — and another case is never shown in its place.`}
+                  action={<Button onClick={() => go('overview')}>Back to the ledger</Button>}
+                />
+              </div>
+            </div>
+          ))}
           {route === 'activity' && <Activity workspace={workspace} onOpenCase={openCase} onOpenCommitment={openCommitment} toast={toast} onNavigate={go} />}
           {route === 'settings' && <Settings workspace={workspace} onChange={setWorkspace} toast={toast} mode={mode} />}
         </main>
@@ -362,6 +400,273 @@ function Baton() {
       <rect x="1.2" y="5.8" width="11.6" height="2.4" rx="1.2" fill="currentColor" opacity=".95" />
       <path d="M4.4 8.2V3.1M9.6 8.2V3.1" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" opacity=".55" />
     </svg>
+  );
+}
+
+/** How a record's state reads in a sentence, without overclaiming. */
+function recordStateWords(record: PanelRecord): string {
+  if (record.status === 'unmanaged') return 'Relay holds the record but is not managing the issue';
+  if (record.status === 'initializing') return 'a Track or Stop managing started and did not finish';
+  if (record.status === 'managed') return 'Relay is managing the issue';
+  if (record.state) return `the record carries the state “${record.state}”, which this console does not recognise`;
+  return 'the record carries a state this console does not recognise';
+}
+
+/**
+ * The panel for the issue the app is mounted in.
+ *
+ * What it renders is decided by the direct record lookup alone (`status`), never
+ * by the tracked list. The four outcomes are kept apart on purpose:
+ *
+ *   * a managed record that did not come back with the workspace — a read
+ *     problem, not an absence;
+ *   * an existing record Relay is not managing — the case this panel used to
+ *     report as "no record";
+ *   * genuinely no record;
+ *   * the lookup failed — never shown as "no record".
+ */
+export function PanelIssue({ issueKey, record, onTrack }: {
+  issueKey: string;
+  record: PanelRecord | null;
+  onTrack: (key: string) => Promise<TrackResult | null>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [lookup, setLookup] = useState<PanelRecord | null>(record);
+  const [reading, setReading] = useState(false);
+
+  // A later bootstrap (or a retry) replaces the answer; the panel follows it.
+  useEffect(() => { setLookup(record); }, [record]);
+
+  const track = async () => {
+    setBusy(true);
+    setFailure(null);
+    const result = await onTrack(issueKey);
+    setBusy(false);
+    // `null` means the call itself threw; the toast has reported that, and the
+    // issue is still untracked either way, so this panel stays where it is.
+    if (result && result.status !== 'managed' && result.status !== 'already_managed') {
+      setFailure(result.error ?? `${issueKey} did not finish (${result.stage ?? 'unknown'}) and stays withheld.`);
+    }
+  };
+
+  /** Re-read the record. This changes no management state and writes nothing. */
+  const retry = async () => {
+    setReading(true);
+    try {
+      setLookup(await api.issueRecord(issueKey));
+    } catch (err) {
+      setLookup({
+        key: issueKey,
+        status: 'error',
+        state: null,
+        rev: null,
+        updatedAt: null,
+        open: null,
+        inTrackedList: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setReading(false);
+    }
+  };
+
+  const retryButton = (
+    <Button icon="sync" onClick={() => void retry()} disabled={reading}>
+      {reading ? 'Reading…' : 'Read it again'}
+    </Button>
+  );
+
+  const trackButton = (
+    <Button variant="primary" icon="sync" onClick={() => void track()} disabled={busy}>
+      {busy ? 'Tracking…' : 'Track this issue'}
+    </Button>
+  );
+
+  const trackFailure = failure && (
+    <div style={{ marginTop: 18 }}>
+      <Notice tone="danger">{failure}</Notice>
+    </div>
+  );
+
+  // No answer at all: an older backend, or the bridge returned nothing. That is
+  // not evidence of absence, so it is reported as unreadable.
+  if (!lookup) {
+    return (
+      <div className="wrap wrap--narrow">
+        <div className="page" style={{ marginTop: 26 }}>
+          <Notice tone="warn">
+            Relay could not read its record for {issueKey} with this page load. That is not the same as holding
+            no record — nothing is claimed either way until the read succeeds.
+          </Notice>
+          <div style={{ marginTop: 18 }}>{retryButton}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // A managed record exists but the workspace did not return it. Keep the
+  // existing, honest answer: a read problem, and never another case in its place.
+  if (lookup.status === 'managed') {
+    return (
+      <div className="wrap wrap--narrow">
+        <div className="page" style={{ marginTop: 26 }}>
+          <Notice tone="warn">
+            Relay reports {issueKey} as managed, but no record for it came back with the workspace, so there is
+            nothing here that can be shown safely. Reading it again, or reloading the page, is the only remedy
+            offered — Relay will not put another case in its place.
+          </Notice>
+          <div style={{ marginTop: 18 }}>{retryButton}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // The lookup failed. Distinct from "no record", and it says so.
+  if (lookup.status === 'error') {
+    return (
+      <div className="wrap wrap--narrow">
+        <div className="page" style={{ marginTop: 26 }}>
+          <div className="masthead-line">
+            <div>
+              <div className="masthead-line__date">{issueKey} · issue panel</div>
+              <h1 className="page-title">Relay could not read this issue’s record</h1>
+            </div>
+          </div>
+          <div style={{ marginTop: 18 }}>
+            <Notice tone="danger">
+              The ledger lookup failed{lookup.error ? ` (${lookup.error})` : ''}. Relay has <strong>not</strong>{' '}
+              established that {issueKey} has no record — it could not ask. Reading it again changes nothing:
+              no record is created, no state is changed and no commitment is touched.
+            </Notice>
+          </div>
+          <div style={{ marginTop: 18 }}>{retryButton}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // A record exists. What the panel may offer depends on what the record says:
+  // an `unmanaged` record can be taken over, but an `initializing` one may have
+  // an operation in flight, and an unrecognised state must not be guessed at.
+  if (lookup.status !== 'missing') {
+    const details = [
+      lookup.rev !== null ? `revision ${lookup.rev}` : null,
+      lookup.open !== null ? `${lookup.open} unresolved commitment${lookup.open === 1 ? '' : 's'} retained` : null,
+      lookup.updatedAt ? `last written ${lookup.updatedAt}` : null,
+    ].filter(Boolean) as string[];
+
+    const header = (
+      <div className="masthead-line">
+        <div>
+          <div className="masthead-line__date">{issueKey} · issue panel</div>
+          <h1 className="page-title">Relay holds a record for this issue</h1>
+          <p className="page-lede">
+            {issueKey} is in Relay’s ledger: {recordStateWords(lookup)}
+            {details.length ? ` (${details.join(', ')})` : ''}. That is not the same as having no record, and it
+            is why this panel is not offering to create one. Open cases are listed from the issues Relay manages,
+            so an issue Relay is not managing does not appear there — the record itself still exists, and
+            Relay will not overwrite it.
+          </p>
+        </div>
+      </div>
+    );
+
+    // An operation has started and not finished. Starting another could race it,
+    // so the panel offers a re-read and no state change.
+    if (lookup.status === 'initializing') {
+      return (
+        <div className="wrap wrap--narrow">
+          <div className="page" style={{ marginTop: 26 }}>
+            {header}
+            <div style={{ marginTop: 18 }}>
+              <Notice tone="warn">
+                A management operation for {issueKey} may already be in progress. The record is in the state
+                initializing, which is what Relay holds while it sets an issue up or takes it down; closure is
+                withheld while it is there. This panel does not offer Track or Stop managing, because a second
+                operation started now could race the one that is running. Reading the record again changes
+                nothing — it only asks where the operation has got to.
+              </Notice>
+            </div>
+            <div style={{ marginTop: 18 }}>{retryButton}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // A state this console does not know. It says so, and changes nothing.
+    if (lookup.status === 'unknown-state') {
+      return (
+        <div className="wrap wrap--narrow">
+          <div className="page" style={{ marginTop: 26 }}>
+            {header}
+            <div style={{ marginTop: 18 }}>
+              <Notice tone="danger">
+                The record for {issueKey} carries a management state this console does not recognise
+                {lookup.state ? ` (“${lookup.state}”)` : ''}. Relay will not guess what it means, and nothing here
+                is changed on the strength of a guess: no Track, no Stop managing, and no field or property write.
+                Reading the record again changes nothing either. If it persists, the issue’s history is the place
+                to find out what wrote it.
+              </Notice>
+            </div>
+            <div style={{ marginTop: 18 }}>{retryButton}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // `unmanaged`: Relay holds a record and is not managing the issue. Track is
+    // the way in — and it is a state change, not a read, so it says so.
+    return (
+      <div className="wrap wrap--narrow">
+        <div className="page" style={{ marginTop: 26 }}>
+          {header}
+
+          {trackFailure}
+
+          <div style={{ marginTop: 22 }}>
+            <Empty
+              title={busy ? `Tracking ${issueKey}…` : `Track ${issueKey}`}
+              text={busy
+                ? 'Reading the issue and its comments, then setting it to managed.'
+                : `Tracking changes ${issueKey} from unmanaged to managed. Relay keeps the record that already exists, reads the issue’s existing Jira comments once, and may capture sentences from them as proposed commitments. Those proposals are not accepted automatically, and nothing becomes binding just by being captured. This is a management-state change, not a read-only action.`}
+              action={trackButton}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Genuinely no record.
+  return (
+    <div className="wrap wrap--narrow">
+      <div className="page" style={{ marginTop: 26 }}>
+        <div className="masthead-line">
+          <div>
+            <div className="masthead-line__date">{issueKey} · issue panel</div>
+            <h1 className="page-title">This issue is not in the ledger yet</h1>
+            <p className="page-lede">
+              Relay holds no record for {issueKey}, so it has no commitments, no owner and no closure state to
+              show. Tracking reads the issue and its comments once and records it; it never overwrites a record
+              that already exists.
+            </p>
+          </div>
+        </div>
+
+        {trackFailure}
+
+        <div style={{ marginTop: 22 }}>
+          <Empty
+            title={busy ? `Tracking ${issueKey}…` : `Track ${issueKey}`}
+            text={busy
+              ? 'Reading the issue and its comments.'
+              : 'Nothing is claimed about this case until Relay has actually read it. The issue stays withheld until tracking completes.'}
+            action={trackButton}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
