@@ -49,11 +49,32 @@ test('a missing projection is written from the record and both fields are read b
 
 test('a fresh, matching projection and fields are not rewritten', async () => {
   const l = record(3, [{ code: 'CM-1', status: 'open', owner: 'a', dueAt: null }]);
-  const projection = { ledgerRev: 3, open: 1, overdue: 0, unowned: 0, awaitingReview: 0, updatedAt: now.toISOString() };
+  const projection = { ledgerRev: 3, state: 'managed', open: 1, overdue: 0, unowned: 0, awaitingReview: 0, updatedAt: now.toISOString() };
   const io = fakeIo({ ledger: l, projection });
   const res = await syncIssue(io, 'REP-1', { now });
   assert.equal(res.status, 'fresh');
   assert.equal(io.state.writes.projection, 0);
+});
+
+test('a projection written before the state was materialised is rewritten, not trusted', async () => {
+  // The upgrade case: 2.7 projections have the count but no state, so the
+  // condition would read a property it cannot interpret and withhold every
+  // closure. Fresh is not enough — the state has to be there.
+  const l = record(3, []);
+  const projection = { ledgerRev: 3, open: 0, overdue: 0, unowned: 0, awaitingReview: 0, updatedAt: now.toISOString() };
+  const io = fakeIo({ ledger: l, projection });
+  const res = await syncIssue(io, 'REP-1', { now });
+  assert.equal(res.status, 'wrote');
+  assert.equal(io.state.projection.state, 'managed');
+});
+
+test('a projection whose state disagrees with the record is rewritten', async () => {
+  const l = record(3, [], 'unmanaged');
+  const projection = { ledgerRev: 3, state: 'managed', open: 0, overdue: 0, unowned: 0, awaitingReview: 0, updatedAt: now.toISOString() };
+  const io = fakeIo({ ledger: l, projection });
+  const res = await syncIssue(io, 'REP-1', { now });
+  assert.equal(res.status, 'wrote');
+  assert.equal(io.state.projection.state, 'unmanaged');
 });
 
 test('a state field that has drifted is repaired even when the count is right', async () => {

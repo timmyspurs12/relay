@@ -443,15 +443,35 @@ for (const [index, condition] of conditions.entries()) {
   if (!/==\s*0\b/.test(expression)) fail(at, 'does not require the count to be exactly zero');
   if (/<=\s*0/.test(expression) || /!=\s*0/.test(expression)) fail(at, 'count comparison is not exactly zero');
 
-  const refs = [...new Set([...expression.matchAll(/issue\.([A-Za-z0-9_]+)/g)].map((m) => m[1]))];
-  if (refs.length !== 2) fail(at, `expected exactly two field references, found ${refs.length}: ${refs.join(', ') || 'none'}`);
-  for (const ref of refs) {
-    if (!/^customfield_\d+$/.test(ref) && !/^customfield_relay_(closure_count|management_state)$/.test(ref)) {
-      fail(at, `"${ref}" is neither a resolved custom field id nor the documented placeholder`);
+  // Two shapes are accepted:
+  //
+  //   * the projection property (`issue.properties['relay.closure']`), which is
+  //     the app's own name and the same on every site — this is the one to ship;
+  //   * two custom-field references, which is the older shape and is still
+  //     checked for correctness even though a field id only exists on the site
+  //     that generated it.
+  const properties = [...new Set([...expression.matchAll(/issue\.properties\[\s*['"]([^'"]+)['"]\s*\]/g)].map((m) => m[1]))];
+  if (properties.length) {
+    if (properties.length !== 1 || properties[0] !== 'relay.closure') {
+      fail(at, `expected the projection property "relay.closure", found: ${properties.join(', ')}`);
+    }
+    if (!/\[\s*['"]state['"]\s*\]/.test(expression)) fail(at, 'does not read the projection\'s state');
+    if (!/\[\s*['"]open['"]\s*\]/.test(expression)) fail(at, 'does not read the projection\'s open count');
+    if (/customfield_\d+/.test(expression)) fail(at, 'names a site-specific field id as well as the property');
+  } else {
+    const refs = [...new Set([...expression.matchAll(/issue\.([A-Za-z0-9_]+)/g)].map((m) => m[1]))];
+    if (refs.length !== 2) fail(at, `expected exactly two field references, found ${refs.length}: ${refs.join(', ') || 'none'}`);
+    for (const ref of refs) {
+      if (!/^customfield_\d+$/.test(ref) && !/^customfield_relay_(closure_count|management_state)$/.test(ref)) {
+        fail(at, `"${ref}" is neither a resolved custom field id nor the documented placeholder`);
+      }
+    }
+    if (!/^customfield_\d+$/.test(refs[0]) && !/^customfield_\d+$/.test(refs[1])) {
+      note(at, 'neither reference is a resolved id: the manifest still waits for the per-site line');
     }
   }
   if (!problems.some((p) => p.startsWith('jira:workflowCondition'))) {
-    ok(`condition ${condition.key}: two field references, balanced, exact "unmanaged" / "managed" + 0`);
+    ok(`condition ${condition.key}: ${properties.length ? `reads ${properties[0]}['state'] / ['open']` : 'two field references'}, balanced, exact "unmanaged" / "managed" + 0`);
   }
 }
 

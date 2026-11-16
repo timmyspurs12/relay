@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { createHandlers } from '../src/handlers.js';
 import {
   CLOSURE_FIELD_MODULE_KEY, CLOSURE_FIELD_PLACEHOLDER, STATE_FIELD_MODULE_KEY, STATE_FIELD_PLACEHOLDER,
+  closureExpression,
 } from '../src/field.js';
 import { createMemoryRecords } from './support/fake-forge.js';
 import { RECORD_ATTRIBUTES } from '../src/record-codec.js';
@@ -153,9 +154,20 @@ test('every description is a quoted scalar, so a colon inside it cannot break th
   assert.deepEqual(bare.map(([, n]) => n), [], 'unquoted ": " in a scalar: quote the whole value (see line numbers)');
 });
 
-test('the condition expression needs both fields and never treats a missing one as unmanaged', () => {
-  const expression = manifest.match(/expression: '([^']+)'/)?.[1]?.replace(/\s+/g, ' ').trim();
-  assert.ok(expression, 'the condition needs an expression');
+test('the condition reads the projection property, so the manifest carries no site-specific id', () => {
+  const quoted = manifest.match(/expression: '((?:[^']|'')*)'/)?.[1];
+  assert.ok(quoted, 'the condition needs an expression');
+  const expression = quoted.replace(/''/g, "'").replace(/\s+/g, ' ').trim();
+
+  // The portability contract: this manifest is installed on somebody else's
+  // site without being edited first. A generated field id would make the
+  // expression fail there, and Jira treats an expression error as false — every
+  // closure hidden, silently, in a direction no screenshot can show.
+  assert.equal(expression, closureExpression({}), 'the manifest and the code build the same expression');
+  assert.ok(!/customfield_\d/.test(expression), 'no resolved field id may reach the manifest');
+
+  // The two mirror fields still exist and the console still resolves their ids;
+  // they are simply no longer what the condition reads.
   assert.equal(
     `customfield_${CLOSURE_FIELD_MODULE_KEY.replace(/-/g, '_')}`,
     CLOSURE_FIELD_PLACEHOLDER,
@@ -166,13 +178,7 @@ test('the condition expression needs both fields and never treats a missing one 
     STATE_FIELD_PLACEHOLDER,
     'the state placeholder is derived from its module key',
   );
-  // Either the placeholders (before the app resolves the ids) or real ids.
-  // Never a field somebody created by hand: that is what P2.1 removed.
-  const state = '(issue\\.(customfield_\\d+|customfield_relay_management_state))';
-  const count = '(issue\\.(customfield_\\d+|customfield_relay_closure_count))';
-  assert.match(expression, new RegExp(`^\\(${state} == "unmanaged"\\) \\|\\| \\(${state} == "managed" && ${count} == 0\\)$`));
-  assert.ok(!/properties\[/.test(expression), 'the condition reads fields, not an entity property');
-  assert.match(manifest, /relay\.field\.resolve/, 'the manifest must say how the ids are obtained');
+  assert.match(manifest, /relay\.field\.resolve/, 'the manifest must say how the ids are obtained for the console');
 });
 
 test('the record entity is declared, with the revision the conditional commit checks', () => {

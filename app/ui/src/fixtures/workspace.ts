@@ -328,7 +328,7 @@ export const fixtureWorkspace: Workspace = {
     enforcement: {
       validatorInstalled: true,
       conditionInstalled: true,
-      conditionExpression: '(issue.customfield_10124 == "unmanaged") || (issue.customfield_10124 == "managed" && issue.customfield_10123 == 0)',
+      conditionExpression: '(issue.properties[\'relay.closure\'][\'state\'] == "unmanaged") || (issue.properties[\'relay.closure\'][\'state\'] == "managed" && issue.properties[\'relay.closure\'][\'open\'] == 0)',
       field: {
         count: {
           which: 'count',
