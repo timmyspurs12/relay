@@ -141,7 +141,7 @@ export function Settings({ workspace, onChange, toast, mode }: {
                     <div className="setting__desc">
                       {workspace.issues.length
                         ? `Relay holds a commitment ledger for ${workspace.issues.length} case${workspace.issues.length > 1 ? 's' : ''}.`
-                        : 'No case is tracked yet. Open a Facilities issue in Jira and use the Commitments panel, or add its key here.'}
+                        : 'No case is tracked yet. Open an issue in Jira and use the Commitments panel, or add its key here.'}
                     </div>
                   </div>
                   <div className="setting__control mono" style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>

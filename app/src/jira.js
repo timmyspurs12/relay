@@ -182,10 +182,31 @@ export function createJira({ requestJira, route, log = () => {} }) {
    * Every field Jira knows about, used to resolve the app's own field by the
    * type id Forge derives from the manifest. Read once per resolution and
    * cached by the caller, not per mutation.
+   *
+   * This reads `GET /rest/api/3/field/search`, not `GET /rest/api/3/field`.
+   * The plain endpoint does not list app-owned fields at all: on a fresh
+   * install of the production app the two Relay fields existed and were
+   * visible in Jira's admin field list, while `/rest/api/3/field` returned 51
+   * entries and neither of them — so every lookup failed with
+   * `closure_field_unresolved` and every case stayed withheld. The search
+   * endpoint returns the same fields with their full `schema.custom` type id
+   * (`ari:cloud:ecosystem::extension/{appId}/{environmentId}/static/{moduleKey}`).
+   *
+   * It paginates, so every page is read: the field Relay owns is one of the
+   * newest on the site and would otherwise fall beyond the first page.
    */
-  async function listFields() {
-    const data = await readJson(route`/rest/api/3/field`);
-    return Array.isArray(data) ? data : [];
+  async function listFields({ pageSize = 50, maxPages = 20 } = {}) {
+    const out = [];
+    let startAt = 0;
+    for (let page = 0; page < maxPages; page += 1) {
+      const data = await readJson(route`/rest/api/3/field/search?startAt=${startAt}&maxResults=${pageSize}`);
+      const values = Array.isArray(data?.values) ? data.values : [];
+      out.push(...values);
+      const isLast = data?.isLast ?? (values.length < pageSize);
+      if (isLast || values.length === 0) break;
+      startAt += values.length;
+    }
+    return out;
   }
 
   /**

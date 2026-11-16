@@ -249,3 +249,35 @@ test('the field is written through the private app-field API and never through E
   assert.match(src, /\/rest\/api\/3\/app\/field\/\$\{fieldIdOrKey\}\/value/);
   assert.match(src, /'PUT'|method: 'PUT'/);
 });
+
+/**
+ * A fresh install of the production app produced this defect, and it is the
+ * reason every case on a new site stayed withheld: `/rest/api/3/field` does not
+ * list app-owned fields, so the lookup found nothing and said
+ * `closure_field_unresolved`. The search endpoint returns them, in pages.
+ */
+test('app fields are found through the field search endpoint, across every page', async () => {
+  const typeId = 'ari:cloud:ecosystem::extension/app/env/static/relay-management-state';
+  const urls = [];
+  const api = createJira({
+    requestJira: async (url) => {
+      urls.push(String(url));
+      const startAt = Number(/startAt=(\d+)/.exec(String(url))?.[1] ?? 0);
+      const data = startAt === 0
+        ? { startAt: 0, maxResults: 50, isLast: false, values: [{ id: 'customfield_1', schema: { custom: 'com.acme:other' } }] }
+        : { startAt: 1, maxResults: 50, isLast: true, values: [{ id: 'customfield_10043', key: 'customfield_10043', name: 'Relay management state', schema: { custom: typeId } }] };
+      return { ok: true, status: 200, json: async () => data, text: async () => '' };
+    },
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  const hit = await api.findFieldByModuleType(typeId);
+  assert.equal(hit?.id, 'customfield_10043', 'the field on the second page must be found');
+  assert.ok(urls.length >= 2, `the reader must page through results, requested ${urls.length}`);
+  assert.match(urls[0], /\/rest\/api\/3\/field\/search/);
+});
+
+test('the plain field list endpoint is never used to resolve an app-owned field', () => {
+  const src = read('src/jira.js');
+  assert.doesNotMatch(src, /route`\/rest\/api\/3\/field`/, 'the plain field list does not include app-owned fields');
+});
