@@ -16,6 +16,11 @@ export function forgeDeps() {
     // asApp(): Relay reads and writes as the installed app, so a resolver does
     // not depend on which user happened to open the console.
     requestJira: (r, init) => api.asApp().requestJira(r, init),
+    // Resolving Relay's own field ids is the one read that needs the widest
+    // identity: Jira hides fields that are not on a screen from a
+    // non-administrator, and the app token is one. Everything else stays
+    // asApp() so behaviour never depends on who opened the console.
+    requestJiraAsUser: (r, init) => api.asUser().requestJira(r, init),
     route,
     log,
   });

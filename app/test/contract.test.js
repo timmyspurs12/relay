@@ -281,3 +281,46 @@ test('the plain field list endpoint is never used to resolve an app-owned field'
   const src = read('src/jira.js');
   assert.doesNotMatch(src, /route`\/rest\/api\/3\/field`/, 'the plain field list does not include app-owned fields');
 });
+
+/**
+ * The app identity is a non-administrator, and Jira hides fields that are not
+ * on a screen from non-administrators. Measured on a fresh site: the app saw 51
+ * fields, an administrator saw 90, and the two Relay fields were only in the
+ * second list. Resolving the app's own field ids therefore reads as the user,
+ * and falls back to the app identity where there is no user to read as.
+ */
+test('the field catalogue is read as the user, and falls back to the app identity', async () => {
+  const typeId = 'ari:cloud:ecosystem::extension/app/env/static/relay-management-state';
+  const asApp = [];
+  const asUser = [];
+  const respond = (hits) => async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      startAt: 0, maxResults: 50, isLast: true, values: hits,
+    }),
+    text: async () => '',
+  });
+
+  const api = createJira({
+    requestJira: async (url) => { asApp.push(String(url)); return respond([])(url); },
+    requestJiraAsUser: async (url) => { asUser.push(String(url)); return respond([{ id: 'customfield_10043', schema: { custom: typeId } }])(url); },
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  const hit = await api.findFieldByModuleType(typeId);
+  assert.equal(hit?.id, 'customfield_10043');
+  assert.equal(asUser.length, 1, 'the user identity must be tried first');
+  assert.equal(asApp.length, 0, 'the app identity must not be used when the user read works');
+
+  const failing = createJira({
+    requestJira: async (url) => { asApp.push(String(url)); return respond([{ id: 'customfield_10043', schema: { custom: typeId } }])(url); },
+    requestJiraAsUser: async () => ({ ok: false, status: 403, json: async () => ({}), text: async () => 'forbidden' }),
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  asApp.length = 0;
+  const fallback = await failing.findFieldByModuleType(typeId);
+  assert.equal(fallback?.id, 'customfield_10043', 'a refused user read must fall back, not fail');
+  assert.ok(asApp.length >= 1, 'the app identity must be tried after the user identity is refused');
+});
