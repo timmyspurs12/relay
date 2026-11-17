@@ -297,8 +297,30 @@ export function createJira({ requestJira, requestJiraAsUser = null, route, log =
     return { status: res.status, accepted: true };
   }
 
+  /**
+   * Read one field value off an issue.
+   *
+   * Read as the signed-in user first, for the same reason the catalogue is: a
+   * field that is not on a screen is invisible to a non-administrator, and the
+   * app token is one. The write lands (204) and the read-back then returns
+   * null, which is indistinguishable from a refused write — that is exactly
+   * how a fresh install failed with `state field did not accept
+   * "initializing" (read null)` after the ids had resolved.
+   *
+   * No user (trigger, validator, scheduled run) means the app identity, which
+   * is also what wrote the value.
+   */
   async function readField(issueKey, fieldId) {
-    const data = await readJson(route`/rest/api/3/issue/${issueKey}?fields=${fieldId}`);
+    const path = route`/rest/api/3/issue/${issueKey}?fields=${fieldId}`;
+    if (requestJiraAsUser) {
+      try {
+        const data = await readJson(path, { requestJiraAsUser });
+        return data?.fields?.[fieldId] ?? null;
+      } catch (err) {
+        log({ event: 'field_read_as_user_failed', status: err?.status ?? null, error: String(err?.message ?? err) });
+      }
+    }
+    const data = await readJson(path);
     return data?.fields?.[fieldId] ?? null;
   }
 
