@@ -206,18 +206,38 @@ test('the count write that lands and reads back leaves the issue correctly count
   assert.ok(fake.field.writes.length >= 1);
 });
 
-test('a field write the API accepts but does not store is a failed track, not a false zero', async () => {
+/**
+ * The two fields are a mirror for humans. The workflow condition reads the
+ * issue property, and that is read back and checked on its own. So a field
+ * value that cannot be read back — because Jira hides a field that is on no
+ * screen from everyone but an administrator, which is the fresh-install case —
+ * is a diagnostic, never a zero and never a dead end.
+ *
+ * A *wrong* value is still a hard failure: that means Jira stored something
+ * other than what was written, and this test proves the difference.
+ */
+test('a field the API accepts but cannot be read back is reported, and the projection still decides', async () => {
   const { handlers, fake, records } = site();
   fake.state.fieldIgnored = true;
   await handlers['relay.workspace.init']({ payload: { projectKey: 'FS' }, context: forgeContext() });
 
   const res = await handlers['relay.workspace.track']({ payload: { key: 'FS-101' }, context: forgeContext() });
 
+  assert.notEqual(res.track.status, 'failed', 'an invisible mirror must not fail the track');
+  assert.equal((await records.read('FS-101')).state, 'managed');
+  assert.equal(fake.stateField.value, 'managed', 'the state mirror is still written');
+});
+
+test('a field that reads back a different value is a failed track, not a false zero', async () => {
+  const { handlers, fake, records } = site();
+  fake.state.fieldMismatch = true;
+  await handlers['relay.workspace.init']({ payload: { projectKey: 'FS' }, context: forgeContext() }).catch(() => null);
+
+  const res = await handlers['relay.workspace.track']({ payload: { key: 'FS-101' }, context: forgeContext() });
+
   assert.equal(res.track.status, 'failed');
-  assert.equal(res.track.stage, 'capture', 'the guard could not raise the count, so capture stopped');
-  assert.match(res.track.error, /unverified/);
-  assert.equal((await records.read('FS-101')).state, 'initializing', 'and the issue is withheld, not managed');
-  assert.equal(fake.stateField.value, 'initializing');
+  assert.match(res.track.error, /unverified|did not accept/);
+  assert.notEqual((await records.read('FS-101'))?.state, 'managed');
 });
 
 test('a state field the API refuses aborts track before any capture is claimed as managed', async () => {

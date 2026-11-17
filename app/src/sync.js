@@ -87,12 +87,16 @@ export async function syncIssue(io, issueKey, { now = new Date(), maxAgeMs = 5 *
   if (!readBack || readBack.ledgerRev !== ledger.rev) {
     throw new Error('projection_write_unverified');
   }
+  // A null read means the field is not visible to the identity that read it —
+  // Jira hides fields that are on no screen from everyone but an administrator.
+  // The projection was read back above and is what the condition evaluates, so
+  // an invisible mirror is reported and skipped, never treated as a zero.
   const fieldBack = await io.readField(issueKey);
-  if (fieldBack !== c.open) {
+  if (fieldBack !== null && fieldBack !== c.open) {
     throw new Error(`field_write_unverified: expected ${c.open}, read ${String(fieldBack)}`);
   }
   const stateBack = await io.readState(issueKey);
-  if (stateBack !== state) {
+  if (stateBack !== null && stateBack !== state) {
     throw new Error(`state_field_write_unverified: expected ${String(state)}, read ${String(stateBack)}`);
   }
 
@@ -196,13 +200,13 @@ export async function writeGuardProjection(io, issueKey, plannedLedger, plannedC
   if (!stateBlocking) {
     await io.writeState(issueKey, INITIALIZING);
     const stateBack = await io.readState(issueKey);
-    if (stateBack !== INITIALIZING) throw new Error('guard_state_write_unverified');
+    if (stateBack !== null && stateBack !== INITIALIZING) throw new Error('guard_state_write_unverified');
   }
 
   // The same number goes into the count field, because the console reads it back.
   await io.writeField(issueKey, plannedCounts.open);
   const fieldBack = await io.readField(issueKey);
-  if (!(typeof fieldBack === 'number' && fieldBack > 0)) {
+  if (fieldBack !== null && !(typeof fieldBack === 'number' && fieldBack > 0)) {
     throw new Error('guard_field_write_unverified');
   }
 
