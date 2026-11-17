@@ -94,7 +94,7 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
         return describeField(which, { id: null, key: null, typeId });
       }
     }
-    if (!found?.id) return describeField(which, { id: null, key: null, typeId });
+    if (!found?.id) return describeField(which, { id: null, key: null, typeId, seen: found?.seen ?? null, appOwned: found?.appOwned ?? null });
 
     const resolvedAt = now().toISOString();
     const patch = { [`${cachePrefix}Id`]: found.id, [`${cachePrefix}Key`]: found.key ?? null, [`${cachePrefix}TypeId`]: typeId, [`${cachePrefix}ResolvedAt`]: resolvedAt };

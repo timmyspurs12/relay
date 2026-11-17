@@ -162,6 +162,10 @@ export interface ClosureField {
   resolved: boolean;
   resolvedAt: string | null;
   placeholder: string;
+  /** How many fields Jira listed for this app when it was looked up. */
+  seen?: number | null;
+  /** Every app-owned field Jira listed, so a miss can be read off the screen. */
+  appOwned?: { name: string | null; custom: string }[] | null;
 }
 
 /** Both app-owned fields and the one expression that reads them. */

@@ -207,7 +207,7 @@ export function evaluateClosureValue(value, { fieldExists = true, error = null }
  * `resolved: false` is a first-class state: it means the condition cannot read
  * anything yet, which is never "zero open" and never "unmanaged".
  */
-export function describeField(which, { id = null, key = null, typeId = null, resolvedAt = null } = {}) {
+export function describeField(which, { id = null, key = null, typeId = null, resolvedAt = null, seen = null, appOwned = null } = {}) {
   const spec = FIELD_SPECS[which];
   if (!spec) throw new Error(`unknown_field: ${which}`);
   const resolved = isFieldId(id);
@@ -222,6 +222,11 @@ export function describeField(which, { id = null, key = null, typeId = null, res
     resolved,
     resolvedAt: resolvedAt ?? null,
     placeholder: spec.placeholder,
+    // How the lookup went, so an unresolved field can say why on the screen
+    // instead of only in a log: how many fields Jira listed for this app and
+    // which of them belong to any app at all.
+    seen: seen ?? null,
+    appOwned: appOwned ?? null,
   };
 }
 

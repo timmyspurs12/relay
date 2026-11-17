@@ -217,11 +217,24 @@ export function createJira({ requestJira, route, log = () => {} }) {
    * from as if it were Relay's.
    */
   async function findFieldByModuleType(typeId) {
-    if (!typeId) return null;
+    if (!typeId) {
+      log({ event: 'field_lookup_no_type_id' });
+      return null;
+    }
     const fields = await listFields();
     const hit = fields.find((f) => f?.schema?.custom === typeId);
-    if (!hit) return null;
-    return { id: hit.id ?? null, key: hit.key ?? null, name: hit.name ?? null, typeId };
+    // Every other app-owned field Jira returned, so a miss can be explained
+    // from the screen instead of from a log hunt. Names and type ids only —
+    // no issue data ever passes through here.
+    const appOwned = fields
+      .filter((f) => String(f?.schema?.custom ?? '').startsWith('ari:cloud:ecosystem::extension/'))
+      .map((f) => ({ name: f.name ?? null, custom: f.schema.custom }));
+    const diagnostics = { typeId, seen: fields.length, appOwned };
+    if (!hit) {
+      log({ event: 'field_lookup_miss', typeId, seen: fields.length, appOwned: appOwned.length });
+      return { id: null, key: null, name: null, typeId, ...diagnostics };
+    }
+    return { id: hit.id ?? null, key: hit.key ?? null, name: hit.name ?? null, typeId, ...diagnostics };
   }
 
   /**

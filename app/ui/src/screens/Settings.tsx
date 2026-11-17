@@ -306,6 +306,17 @@ export function Settings({ workspace, onChange, toast, mode }: {
                         The field is created when the app is deployed and installed. Until Jira returns its id, the condition has nothing to read, and Relay writes nothing rather than guessing.
                       </p>
                     )}
+                    {!fieldView?.resolved && fieldView?.state && (
+                      <div className="mono" style={{ fontSize: 11, lineHeight: 1.6, marginTop: 6, wordBreak: 'break-all' }}>
+                        <div>{fieldView.state.typeId ? `type id ${fieldView.state.typeId}` : 'no type id could be derived from this invocation'}</div>
+                        <div>
+                          {`fields Jira listed ${fieldView.state.seen ?? 0} · app-owned ${(fieldView.state.appOwned ?? []).length}`}
+                        </div>
+                        {(fieldView.state.appOwned ?? []).map((f) => (
+                          <div key={f.custom} style={{ opacity: 0.75 }}>{`${f.name ?? '(unnamed)'} — ${f.custom.split('/static/')[1] ?? f.custom}`}</div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="setting">
