@@ -1,16 +1,33 @@
 import { useState } from 'react';
 import type { ScreenProps } from './types';
-import { Button, CommitmentStamp, Due, OwnerStamp, Stamp, commitmentTone } from '../components/primitives';
+import { Button, CommitmentStamp, Due, Empty, OwnerStamp, Stamp, commitmentTone } from '../components/primitives';
 import { Dialog } from '../components/overlays';
 import { Icon } from '../components/Icons';
 import { NOT_RECORDED, clock, timeAgo } from '../lib/format';
 
 export function CaseWorkspace({ workspace, onOpenCommitment, onNavigate, onScan, onTrack, onUntrack, issueKey }: ScreenProps & { issueKey: string }) {
-  const issue = workspace.issues.find((i) => i.key === issueKey) ?? workspace.issues[0];
-  const [expanded, setExpanded] = useState<string | null>(issue.commitments[0]?.code ?? null);
+  // Exactly the issue that was asked for. There is no fallback to another case:
+  // showing one issue's ledger under another issue's key is worse than showing
+  // nothing, and would attribute commitments to the wrong case.
+  const issue = workspace.issues.find((i) => i.key === issueKey);
+  const [expanded, setExpanded] = useState<string | null>(issue?.commitments[0]?.code ?? null);
   const [closureOpen, setClosureOpen] = useState(false);
   const [untrackOpen, setUntrackOpen] = useState(false);
   const [untrackReason, setUntrackReason] = useState('');
+
+  // Declared after every hook, so a missing issue cannot change the hook order.
+  if (!issue) {
+    return (
+      <div className="wrap wrap--narrow">
+        <div className="page" style={{ marginTop: 26 }}>
+          <Empty
+            title="That case is not in the ledger"
+            text={`Relay has no record for ${issueKey}, so there is nothing to show here — and another case is never shown in its place.`}
+          />
+        </div>
+      </div>
+    );
+  }
 
   const unresolved = issue.commitments.filter((c) => c.status === 'open' || c.status === 'proposed');
   const caseEvents = workspace.activity.filter((e) => e.issueKey === issue.key);

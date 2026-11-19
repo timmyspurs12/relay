@@ -23,6 +23,11 @@ type Invoker = (name: string, payload?: unknown) => Promise<unknown>;
 
 let invokeRemote: Invoker | null = null;
 
+export type PanelContext = {
+  panelIssue: string | null;
+  panelTracked: boolean | null;
+};
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     p,
@@ -266,6 +271,7 @@ export const api = {
     panelRecord: PanelRecord | null;
   }> {
     const conn = await connectBridge();
+
     if (conn.invoke) {
       invokeRemote = conn.invoke;
       mode = 'live';
@@ -277,6 +283,7 @@ export const api = {
         panelRecord: conn.panelRecord,
       };
     }
+
     mode = 'fixture';
     return { workspace: clone(store), mode, panelIssue: null, panelTracked: null, panelRecord: null };
   },
