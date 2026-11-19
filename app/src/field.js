@@ -1,10 +1,10 @@
 /**
  * The app-owned fields, and the workflow condition that reads them.
  *
- * A workflow condition is evaluated by Jira from the issue, so it can read a
- * field and nothing else. P2.1 declared one app-owned number field. That is not
- * enough for P2.2, because the condition has to distinguish three states that a
- * count alone cannot express:
+ * A workflow condition is evaluated by Jira from the issue: it can read the
+ * issue's fields and its entity properties, but it cannot call Relay. P2.1
+ * declared one app-owned number field. That is not enough for P2.2, because the
+ * condition has to distinguish three states that a count alone cannot express:
  *
  *   * Relay does not manage this issue  → closure permitted;
  *   * Relay is still initialising it    → closure withheld;
@@ -22,15 +22,19 @@
  *      `customfield_NNNNN` id at deploy time, so Relay resolves it and caches
  *      it — it is discovered, never guessed, and never reused across
  *      environments.
- *   2. **The condition expression.** One string, built from the resolved ids and
- *      kept in one place so the manifest, the console, the runbook and the
- *      tests cannot drift apart.
+ *   2. **The condition expression.** One string, kept in one place so the
+ *      manifest, the console, the runbook and the tests cannot drift apart. It
+ *      names the projection *property*, not a field id: a field id is generated
+ *      per app and per environment, so an expression built from one carries the
+ *      site it was written on and silently refuses every closure anywhere else.
  *   3. **The evaluator.** A faithful mirror of what the expression does, so the
  *      states that matter — unmanaged, initialising, managed with zero, managed
  *      with work, null, missing, invalid — can be tested without a live site.
  *      The mirror is a mirror. Only Jira evaluates the real expression; the
  *      authority for enforcement inside Relay is the ledger record.
  */
+
+import { PROJECTION_KEY } from './projection.js';
 
 /** The two fields, as declared in manifest.yml under `jira:customField`. */
 export const FIELD_SPECS = Object.freeze({
@@ -112,29 +116,34 @@ export function isConditionState(value) {
 /**
  * The Jira expression the workflow condition evaluates.
  *
- *   (issue.<state> == "unmanaged")
- *     || (issue.<state> == "managed" && issue.<count> == 0)
+ *   (issue.properties['relay.closure']['state'] == "unmanaged")
+ *     || (issue.properties['relay.closure']['state'] == "managed"
+ *         && issue.properties['relay.closure']['open'] == 0)
  *
- * Which is true only when:
- *
- *   - the state field holds exactly `"unmanaged"`; or
- *   - the state field holds exactly `"managed"` **and** the count holds exactly
- *     the number 0.
+ * Which is true only when the projection says `"unmanaged"`, or says
+ * `"managed"` **and** its `open` is exactly the number 0.
  *
  * False for `"initializing"`, for null, for any other string, and for any count
  * that is not zero (including null, a string or an object — no coercion to
- * zero). An evaluation error — a field that does not exist, which is the state
- * before the app has resolved the ids — is treated by Jira as false. So every
- * state short of "explicitly unmanaged" or "managed and confirmed zero"
- * refuses the transition, and `missing` is never read as `unmanaged`.
+ * zero). False too when the property or either member is absent: reading a
+ * property that is not there yields nothing, and an evaluation that raises is
+ * treated by Jira as false. So every state short of "explicitly unmanaged" or
+ * "managed and confirmed zero" refuses the transition, and `missing` is never
+ * read as `unmanaged`.
+ *
+ * The parameters are accepted and ignored. They used to select which custom
+ * field to name; the expression no longer names one. Callers still pass them,
+ * and `describeFields` still reports the ids, because the console and the
+ * reconcile report read those two fields back as a mirror of the projection.
+ * Naming a field id here was the portability defect: ids are generated per app
+ * and per environment, so the manifest carried the site it was written on.
  */
-export function closureExpression({ count = CLOSURE_FIELD_PLACEHOLDER, state = STATE_FIELD_PLACEHOLDER } = {}) {
-  const countId = isFieldId(count) ? count : CLOSURE_FIELD_PLACEHOLDER;
-  const stateId = isFieldId(state) ? state : STATE_FIELD_PLACEHOLDER;
-  return `(issue.${stateId} == "unmanaged") || (issue.${stateId} == "managed" && issue.${countId} == 0)`;
+export function closureExpression({ count = null, state = null } = {}) { // eslint-disable-line no-unused-vars
+  const p = `issue.properties['${PROJECTION_KEY}']`;
+  return `(${p}['state'] == "unmanaged") || (${p}['state'] == "managed" && ${p}['open'] == 0)`;
 }
 
-/** The expression as written in the manifest before either id is known. */
+/** The expression as written in the manifest. It names no site-specific value. */
 export const PLACEHOLDER_EXPRESSION = closureExpression({});
 
 /**
@@ -198,7 +207,7 @@ export function evaluateClosureValue(value, { fieldExists = true, error = null }
  * `resolved: false` is a first-class state: it means the condition cannot read
  * anything yet, which is never "zero open" and never "unmanaged".
  */
-export function describeField(which, { id = null, key = null, typeId = null, resolvedAt = null } = {}) {
+export function describeField(which, { id = null, key = null, typeId = null, resolvedAt = null, seen = null, appOwned = null } = {}) {
   const spec = FIELD_SPECS[which];
   if (!spec) throw new Error(`unknown_field: ${which}`);
   const resolved = isFieldId(id);
@@ -213,6 +222,11 @@ export function describeField(which, { id = null, key = null, typeId = null, res
     resolved,
     resolvedAt: resolvedAt ?? null,
     placeholder: spec.placeholder,
+    // How the lookup went, so an unresolved field can say why on the screen
+    // instead of only in a log: how many fields Jira listed for this app and
+    // which of them belong to any app at all.
+    seen: seen ?? null,
+    appOwned: appOwned ?? null,
   };
 }
 

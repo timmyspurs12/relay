@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   CLOSURE_FIELD_MODULE_KEY,
-  CLOSURE_FIELD_PLACEHOLDER,
   STATE_FIELD_MODULE_KEY,
-  STATE_FIELD_PLACEHOLDER,
   closureExpression,
   describeField,
   describeFields,
@@ -13,7 +11,9 @@ import {
   evaluateClosureValue,
   isFieldId,
   moduleTypeIdFrom,
+  PLACEHOLDER_EXPRESSION,
 } from '../src/field.js';
+import { PROJECTION_KEY } from '../src/projection.js';
 import { createHandlers } from '../src/handlers.js';
 import {
   COUNT_FIELD_ID, ENV_ID, MODULE_TYPE_PREFIX, STATE_FIELD_ID,
@@ -44,14 +44,18 @@ test('only a Jira-generated numeric id counts as a resolved field', () => {
 
 test('the expression permits exactly two states: explicitly unmanaged, or managed and zero', () => {
   const e = closureExpression({ count: 'customfield_1', state: 'customfield_2' });
-  assert.equal(e, '(issue.customfield_2 == "unmanaged") || (issue.customfield_2 == "managed" && issue.customfield_1 == 0)');
+  assert.equal(
+    e,
+    "(issue.properties['relay.closure']['state'] == \"unmanaged\") || (issue.properties['relay.closure']['state'] == \"managed\" && issue.properties['relay.closure']['open'] == 0)",
+  );
 });
 
-test('an unresolved field falls back to a token that cannot be a real field', () => {
-  const e = closureExpression({});
-  assert.ok(e.includes(CLOSURE_FIELD_PLACEHOLDER));
-  assert.ok(e.includes(STATE_FIELD_PLACEHOLDER));
-  assert.ok(!/customfield_\d/.test(e), 'no numeric id appears until Jira returns one');
+test('the expression names the projection property, so the ids it is given are ignored', () => {
+  const withIds = closureExpression({ count: 'customfield_1', state: 'customfield_2' });
+  assert.equal(withIds, closureExpression({}), 'the field ids cannot change the expression');
+  assert.equal(withIds, PLACEHOLDER_EXPRESSION);
+  assert.ok(withIds.includes(`issue.properties['${PROJECTION_KEY}']`), 'the property is the one topic.java writes');
+  assert.ok(!/customfield/.test(withIds), 'a field id or placeholder here is a manifest that only works on one site');
 });
 
 /* ------------------------------------------------------------- evaluator */
@@ -108,7 +112,7 @@ test('the count half keeps its own coercion rules', () => {
 
 /* -------------------------------------------------------------- describe */
 
-test('an unresolved pair keeps its module metadata and prints a placeholder line', () => {
+test('an unresolved pair keeps its module metadata and prints a line that names no field', () => {
   const d = describeFields({ count: { typeId: `${MODULE_TYPE_PREFIX}/relay-closure-count` } });
   assert.equal(d.resolved, false);
   assert.equal(d.count.resolved, false);
@@ -116,17 +120,20 @@ test('an unresolved pair keeps its module metadata and prints a placeholder line
   assert.equal(d.state.moduleKey, 'relay-management-state');
   assert.ok(d.manifestLine.startsWith("expression: '"));
   assert.ok(d.manifestLine.includes('"unmanaged"'), 'the copy-paste line keeps the comparison intact');
-  assert.ok(d.expression.includes(CLOSURE_FIELD_PLACEHOLDER));
+  assert.ok(d.expression.includes(`issue.properties['${PROJECTION_KEY}']`));
 });
 
-test('a resolved pair prints the line the runbook pastes', () => {
+test('a resolved pair prints the line the runbook pastes, whichever ids resolved', () => {
   const d = describeFields({
     count: { id: COUNT_FIELD_ID, key: 'k', typeId: 't', resolvedAt: 'now' },
     state: { id: STATE_FIELD_ID, key: 'k2', typeId: 't2', resolvedAt: 'now' },
   });
   assert.equal(d.resolved, true);
-  assert.equal(d.expression, `(issue.${STATE_FIELD_ID} == "unmanaged") || (issue.${STATE_FIELD_ID} == "managed" && issue.${COUNT_FIELD_ID} == 0)`);
-  assert.equal(d.manifestLine, `expression: '${d.expression}'`);
+  assert.equal(d.expression, PLACEHOLDER_EXPRESSION, 'resolving the ids does not change the expression');
+  // The manifest is a YAML single-quoted scalar, so the apostrophes around the
+  // property name are doubled. Un-double them and the line is the expression.
+  const quoted = d.manifestLine.replace(/^expression: '/, '').replace(/'$/, '');
+  assert.equal(quoted.replace(/''/g, "'"), d.expression, 'the copy-paste line survives YAML quoting');
 });
 
 test('one resolved field is not enough to claim the condition can read', () => {
@@ -178,14 +185,13 @@ test('a different environment invalidates the cache instead of writing into the 
   assert.equal(ENV_ID !== '00000000-0000-0000-0000-000000000000', true);
 });
 
-test('a missing state field leaves the pair unresolved and the expression on its placeholder', async () => {
+test('a missing state field leaves the pair unresolved while the expression stays usable', async () => {
   const { handlers } = site({ stateFieldPresent: false });
   const res = await handlers['relay.field.resolve']({ context: forgeContext() });
   assert.equal(res.fields.count.resolved, true);
   assert.equal(res.fields.state.resolved, false);
   assert.equal(res.fields.resolved, false);
-  assert.ok(res.expression.includes(STATE_FIELD_PLACEHOLDER), 'the unresolved half stays a placeholder');
-  assert.ok(!res.expression.includes(CLOSURE_FIELD_PLACEHOLDER), 'the resolved half names the real field');
+  assert.ok(!res.expression.includes('customfield'), 'the expression no longer depends on which ids resolved');
 });
 
 test('the count write that lands and reads back leaves the issue correctly counted', async () => {
@@ -200,18 +206,38 @@ test('the count write that lands and reads back leaves the issue correctly count
   assert.ok(fake.field.writes.length >= 1);
 });
 
-test('a field write the API accepts but does not store is a failed track, not a false zero', async () => {
+/**
+ * The two fields are a mirror for humans. The workflow condition reads the
+ * issue property, and that is read back and checked on its own. So a field
+ * value that cannot be read back — because Jira hides a field that is on no
+ * screen from everyone but an administrator, which is the fresh-install case —
+ * is a diagnostic, never a zero and never a dead end.
+ *
+ * A *wrong* value is still a hard failure: that means Jira stored something
+ * other than what was written, and this test proves the difference.
+ */
+test('a field the API accepts but cannot be read back is reported, and the projection still decides', async () => {
   const { handlers, fake, records } = site();
   fake.state.fieldIgnored = true;
   await handlers['relay.workspace.init']({ payload: { projectKey: 'FS' }, context: forgeContext() });
 
   const res = await handlers['relay.workspace.track']({ payload: { key: 'FS-101' }, context: forgeContext() });
 
+  assert.notEqual(res.track.status, 'failed', 'an invisible mirror must not fail the track');
+  assert.equal((await records.read('FS-101')).state, 'managed');
+  assert.equal(fake.stateField.value, 'managed', 'the state mirror is still written');
+});
+
+test('a field that reads back a different value is a failed track, not a false zero', async () => {
+  const { handlers, fake, records } = site();
+  fake.state.fieldMismatch = true;
+  await handlers['relay.workspace.init']({ payload: { projectKey: 'FS' }, context: forgeContext() }).catch(() => null);
+
+  const res = await handlers['relay.workspace.track']({ payload: { key: 'FS-101' }, context: forgeContext() });
+
   assert.equal(res.track.status, 'failed');
-  assert.equal(res.track.stage, 'capture', 'the guard could not raise the count, so capture stopped');
-  assert.match(res.track.error, /unverified/);
-  assert.equal((await records.read('FS-101')).state, 'initializing', 'and the issue is withheld, not managed');
-  assert.equal(fake.stateField.value, 'initializing');
+  assert.match(res.track.error, /unverified|did not accept/);
+  assert.notEqual((await records.read('FS-101'))?.state, 'managed');
 });
 
 test('a state field the API refuses aborts track before any capture is claimed as managed', async () => {

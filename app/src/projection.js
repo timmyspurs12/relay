@@ -10,10 +10,24 @@
 export const PROJECTION_KEY = 'relay.closure';
 export const OPEN_FIELD_PROPERTY = 'relay.openCommitments';
 
+/**
+ * The projection carries the management state as well as the count.
+ *
+ * The workflow condition reads this object — `issue.properties['relay.closure']`
+ * — so `state` has to be materialised here, not looked up later: a condition
+ * that cannot see a state must withhold, and "withheld because the property has
+ * no state" is indistinguishable from "withheld because Relay is initialising".
+ * Both are refusals, which is the safe direction, but only the second one is
+ * true. Writing the state is what makes the first one stop happening.
+ *
+ * `state: null` when the ledger is missing is deliberate: null is not
+ * `"unmanaged"`, so it refuses.
+ */
 export function buildProjection(ledger, counts, now = new Date().toISOString()) {
   return {
     ledgerRev: ledger?.rev ?? -1,
     ledgerUpdatedAt: ledger?.updatedAt ?? null,
+    state: ledger?.state ?? null,
     open: counts.open,
     overdue: counts.overdue,
     unowned: counts.unowned,
@@ -40,10 +54,14 @@ export function isStale(projection, ledger, { nowMs = Date.now(), maxAgeMs = 5 *
 }
 
 /**
- * The condition expression Relay installs on the customer-facing transition.
- * It reads a numeric custom field so it does not depend on Jira expressions
- * exposing entity properties — that support is not something we have proven.
- * The field id is site-specific, which is why it is configuration, not code.
+ * The P2.1 condition expression, kept only because a test still pins it.
+ *
+ * Superseded by `closureExpression()` in field.js. The comment that used to sit
+ * here — that entity properties were not "something we have proven" — is no
+ * longer true: `issue.properties['relay.closure']` was evaluated against a live
+ * site and returns the object, with a missing key reading as absent rather than
+ * raising. That is why the condition no longer has to name a site-specific
+ * field id, and why this builder is dead weight rather than a fallback.
  */
 export function conditionExpression(fieldId = 'customfield_relay_open') {
   return `issue.${fieldId} == 0`;

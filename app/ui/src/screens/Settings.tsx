@@ -141,7 +141,7 @@ export function Settings({ workspace, onChange, toast, mode }: {
                     <div className="setting__desc">
                       {workspace.issues.length
                         ? `Relay holds a commitment ledger for ${workspace.issues.length} case${workspace.issues.length > 1 ? 's' : ''}.`
-                        : 'No case is tracked yet. Open a Facilities issue in Jira and use the Commitments panel, or add its key here.'}
+                        : 'No case is tracked yet. Open an issue in Jira and use the Commitments panel, or add its key here.'}
                     </div>
                   </div>
                   <div className="setting__control mono" style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -305,6 +305,17 @@ export function Settings({ workspace, onChange, toast, mode }: {
                       <p className="setting__note">
                         The field is created when the app is deployed and installed. Until Jira returns its id, the condition has nothing to read, and Relay writes nothing rather than guessing.
                       </p>
+                    )}
+                    {!fieldView?.resolved && fieldView?.state && (
+                      <div className="mono" style={{ fontSize: 11, lineHeight: 1.6, marginTop: 6, wordBreak: 'break-all' }}>
+                        <div>{fieldView.state.typeId ? `type id ${fieldView.state.typeId}` : 'no type id could be derived from this invocation'}</div>
+                        <div>
+                          {`fields Jira listed ${fieldView.state.seen ?? 0} · app-owned ${(fieldView.state.appOwned ?? []).length}`}
+                        </div>
+                        {(fieldView.state.appOwned ?? []).map((f) => (
+                          <div key={f.custom} style={{ opacity: 0.75 }}>{`${f.name ?? '(unnamed)'} — ${f.custom.split('/static/')[1] ?? f.custom}`}</div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>

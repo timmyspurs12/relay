@@ -79,7 +79,7 @@ export function Overview({ workspace, onOpenCase, onOpenCommitment, onNavigate }
           <div style={{ marginTop: 26 }}>
             <Empty
               title="No case is tracked yet"
-              text={`Open a ${workspace.integrations.jira.project || 'Facilities'} issue in Jira and use the Commitments panel, or add its key under Settings → Jira connection. Relay only shows cases it has actually read.`}
+              text={`${workspace.integrations.jira.project ? `Open a ${workspace.integrations.jira.project} issue in Jira` : 'Open an issue in Jira'} and use the Commitments panel, or add its key under Settings → Jira connection. Relay only shows cases it has actually read.`}
               action={<Button variant="primary" onClick={() => onNavigate('settings')}>Add a case</Button>}
             />
           </div>

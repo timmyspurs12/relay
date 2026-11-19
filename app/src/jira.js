@@ -53,14 +53,20 @@ const ISSUE_FIELDS = ['summary', 'status', 'assignee', 'reporter', 'priority', '
 /**
  * @param {{ requestJira: Function, route: Function, log?: Function }} deps
  */
-export function createJira({ requestJira, route, log = () => {} }) {
+export function createJira({ requestJira, requestJiraAsUser = null, route, log = () => {} }) {
   async function call(r, init = {}) {
     const res = await requestJira(r, init);
     return res;
   }
 
-  async function readJson(r, init, label) {
-    const res = await call(r, init);
+  async function readJson(r, init = {}, label) {
+    // `requestJiraAsUser` is a per-call choice of identity, not a fetch option.
+    const { requestJiraAsUser: asUser, ...rest } = init ?? {};
+    const res = asUser ? await asUser(r, rest) : await call(r, rest);
+    return readJsonResponse(r, res, label);
+  }
+
+  async function readJsonResponse(r, res, label) {
     if (!res.ok) {
       let detail = '';
       try { detail = (await res.text()).slice(0, 300); } catch { /* body already consumed */ }
@@ -169,13 +175,60 @@ export function createJira({ requestJira, route, log = () => {} }) {
   }
 
   /**
+   * One page of the field catalogue, read with the widest identity available.
+   *
+   * Measured on a fresh site: the *app's* identity is shown 51 fields and none
+   * of them belong to any app, while an administrator is shown 90 including
+   * both Relay fields. Jira hides fields that are not on a screen from a
+   * non-administrator, and an app token is a non-administrator. So the read is
+   * attempted as the signed-in user first — the console is only ever used by
+   * people — and falls back to the app identity where there is no user (a
+   * trigger, a validator, a scheduled run).
+   *
+   * Both identities see the same catalogue shape; only the visibility differs,
+   * so nothing about the match below changes.
+   */
+  async function readFieldsPage(startAt, pageSize) {
+    const path = route`/rest/api/3/field/search?startAt=${startAt}&maxResults=${pageSize}`;
+    if (requestJiraAsUser) {
+      try {
+        return await readJson(path, { requestJiraAsUser });
+      } catch (err) {
+        log({ event: 'field_search_as_user_failed', status: err?.status ?? null, error: String(err?.message ?? err) });
+      }
+    }
+    return readJson(path);
+  }
+
+  /**
    * Every field Jira knows about, used to resolve the app's own field by the
    * type id Forge derives from the manifest. Read once per resolution and
    * cached by the caller, not per mutation.
+   *
+   * This reads `GET /rest/api/3/field/search`, not `GET /rest/api/3/field`.
+   * The plain endpoint does not list app-owned fields at all: on a fresh
+   * install of the production app the two Relay fields existed and were
+   * visible in Jira's admin field list, while `/rest/api/3/field` returned 51
+   * entries and neither of them — so every lookup failed with
+   * `closure_field_unresolved` and every case stayed withheld. The search
+   * endpoint returns the same fields with their full `schema.custom` type id
+   * (`ari:cloud:ecosystem::extension/{appId}/{environmentId}/static/{moduleKey}`).
+   *
+   * It paginates, so every page is read: the field Relay owns is one of the
+   * newest on the site and would otherwise fall beyond the first page.
    */
-  async function listFields() {
-    const data = await readJson(route`/rest/api/3/field`);
-    return Array.isArray(data) ? data : [];
+  async function listFields({ pageSize = 50, maxPages = 20 } = {}) {
+    const out = [];
+    let startAt = 0;
+    for (let page = 0; page < maxPages; page += 1) {
+      const data = await readFieldsPage(startAt, pageSize);
+      const values = Array.isArray(data?.values) ? data.values : [];
+      out.push(...values);
+      const isLast = data?.isLast ?? (values.length < pageSize);
+      if (isLast || values.length === 0) break;
+      startAt += values.length;
+    }
+    return out;
   }
 
   /**
@@ -186,11 +239,24 @@ export function createJira({ requestJira, route, log = () => {} }) {
    * from as if it were Relay's.
    */
   async function findFieldByModuleType(typeId) {
-    if (!typeId) return null;
+    if (!typeId) {
+      log({ event: 'field_lookup_no_type_id' });
+      return null;
+    }
     const fields = await listFields();
     const hit = fields.find((f) => f?.schema?.custom === typeId);
-    if (!hit) return null;
-    return { id: hit.id ?? null, key: hit.key ?? null, name: hit.name ?? null, typeId };
+    // Every other app-owned field Jira returned, so a miss can be explained
+    // from the screen instead of from a log hunt. Names and type ids only —
+    // no issue data ever passes through here.
+    const appOwned = fields
+      .filter((f) => String(f?.schema?.custom ?? '').startsWith('ari:cloud:ecosystem::extension/'))
+      .map((f) => ({ name: f.name ?? null, custom: f.schema.custom }));
+    const diagnostics = { typeId, seen: fields.length, appOwned };
+    if (!hit) {
+      log({ event: 'field_lookup_miss', typeId, seen: fields.length, appOwned: appOwned.length });
+      return { id: null, key: null, name: null, typeId, ...diagnostics };
+    }
+    return { id: hit.id ?? null, key: hit.key ?? null, name: hit.name ?? null, typeId, ...diagnostics };
   }
 
   /**
@@ -220,8 +286,30 @@ export function createJira({ requestJira, route, log = () => {} }) {
     return { status: res.status, accepted: true };
   }
 
+  /**
+   * Read one field value off an issue.
+   *
+   * Read as the signed-in user first, for the same reason the catalogue is: a
+   * field that is not on a screen is invisible to a non-administrator, and the
+   * app token is one. The write lands (204) and the read-back then returns
+   * null, which is indistinguishable from a refused write — that is exactly
+   * how a fresh install failed with `state field did not accept
+   * "initializing" (read null)` after the ids had resolved.
+   *
+   * No user (trigger, validator, scheduled run) means the app identity, which
+   * is also what wrote the value.
+   */
   async function readField(issueKey, fieldId) {
-    const data = await readJson(route`/rest/api/3/issue/${issueKey}?fields=${fieldId}`);
+    const path = route`/rest/api/3/issue/${issueKey}?fields=${fieldId}`;
+    if (requestJiraAsUser) {
+      try {
+        const data = await readJson(path, { requestJiraAsUser });
+        return data?.fields?.[fieldId] ?? null;
+      } catch (err) {
+        log({ event: 'field_read_as_user_failed', status: err?.status ?? null, error: String(err?.message ?? err) });
+      }
+    }
+    const data = await readJson(path);
     return data?.fields?.[fieldId] ?? null;
   }
 

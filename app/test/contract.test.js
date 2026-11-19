@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { createHandlers } from '../src/handlers.js';
 import {
   CLOSURE_FIELD_MODULE_KEY, CLOSURE_FIELD_PLACEHOLDER, STATE_FIELD_MODULE_KEY, STATE_FIELD_PLACEHOLDER,
+  closureExpression,
 } from '../src/field.js';
 import { createMemoryRecords } from './support/fake-forge.js';
 import { RECORD_ATTRIBUTES } from '../src/record-codec.js';
@@ -153,9 +154,20 @@ test('every description is a quoted scalar, so a colon inside it cannot break th
   assert.deepEqual(bare.map(([, n]) => n), [], 'unquoted ": " in a scalar: quote the whole value (see line numbers)');
 });
 
-test('the condition expression needs both fields and never treats a missing one as unmanaged', () => {
-  const expression = manifest.match(/expression: '([^']+)'/)?.[1]?.replace(/\s+/g, ' ').trim();
-  assert.ok(expression, 'the condition needs an expression');
+test('the condition reads the projection property, so the manifest carries no site-specific id', () => {
+  const quoted = manifest.match(/expression: '((?:[^']|'')*)'/)?.[1];
+  assert.ok(quoted, 'the condition needs an expression');
+  const expression = quoted.replace(/''/g, "'").replace(/\s+/g, ' ').trim();
+
+  // The portability contract: this manifest is installed on somebody else's
+  // site without being edited first. A generated field id would make the
+  // expression fail there, and Jira treats an expression error as false — every
+  // closure hidden, silently, in a direction no screenshot can show.
+  assert.equal(expression, closureExpression({}), 'the manifest and the code build the same expression');
+  assert.ok(!/customfield_\d/.test(expression), 'no resolved field id may reach the manifest');
+
+  // The two mirror fields still exist and the console still resolves their ids;
+  // they are simply no longer what the condition reads.
   assert.equal(
     `customfield_${CLOSURE_FIELD_MODULE_KEY.replace(/-/g, '_')}`,
     CLOSURE_FIELD_PLACEHOLDER,
@@ -166,13 +178,7 @@ test('the condition expression needs both fields and never treats a missing one 
     STATE_FIELD_PLACEHOLDER,
     'the state placeholder is derived from its module key',
   );
-  // Either the placeholders (before the app resolves the ids) or real ids.
-  // Never a field somebody created by hand: that is what P2.1 removed.
-  const state = '(issue\\.(customfield_\\d+|customfield_relay_management_state))';
-  const count = '(issue\\.(customfield_\\d+|customfield_relay_closure_count))';
-  assert.match(expression, new RegExp(`^\\(${state} == "unmanaged"\\) \\|\\| \\(${state} == "managed" && ${count} == 0\\)$`));
-  assert.ok(!/properties\[/.test(expression), 'the condition reads fields, not an entity property');
-  assert.match(manifest, /relay\.field\.resolve/, 'the manifest must say how the ids are obtained');
+  assert.match(manifest, /relay\.field\.resolve/, 'the manifest must say how the ids are obtained for the console');
 });
 
 test('the record entity is declared, with the revision the conditional commit checks', () => {
@@ -242,6 +248,81 @@ test('the field is written through the private app-field API and never through E
   const src = read('src/jira.js');
   assert.match(src, /\/rest\/api\/3\/app\/field\/\$\{fieldIdOrKey\}\/value/);
   assert.match(src, /'PUT'|method: 'PUT'/);
+});
+
+/**
+ * A fresh install of the production app produced this defect, and it is the
+ * reason every case on a new site stayed withheld: `/rest/api/3/field` does not
+ * list app-owned fields, so the lookup found nothing and said
+ * `closure_field_unresolved`. The search endpoint returns them, in pages.
+ */
+test('app fields are found through the field search endpoint, across every page', async () => {
+  const typeId = 'ari:cloud:ecosystem::extension/app/env/static/relay-management-state';
+  const urls = [];
+  const api = createJira({
+    requestJira: async (url) => {
+      urls.push(String(url));
+      const startAt = Number(/startAt=(\d+)/.exec(String(url))?.[1] ?? 0);
+      const data = startAt === 0
+        ? { startAt: 0, maxResults: 50, isLast: false, values: [{ id: 'customfield_1', schema: { custom: 'com.acme:other' } }] }
+        : { startAt: 1, maxResults: 50, isLast: true, values: [{ id: 'customfield_10043', key: 'customfield_10043', name: 'Relay management state', schema: { custom: typeId } }] };
+      return { ok: true, status: 200, json: async () => data, text: async () => '' };
+    },
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  const hit = await api.findFieldByModuleType(typeId);
+  assert.equal(hit?.id, 'customfield_10043', 'the field on the second page must be found');
+  assert.ok(urls.length >= 2, `the reader must page through results, requested ${urls.length}`);
+  assert.match(urls[0], /\/rest\/api\/3\/field\/search/);
+});
+
+test('the plain field list endpoint is never used to resolve an app-owned field', () => {
+  const src = read('src/jira.js');
+  assert.doesNotMatch(src, /route`\/rest\/api\/3\/field`/, 'the plain field list does not include app-owned fields');
+});
+
+/**
+ * The app identity is a non-administrator, and Jira hides fields that are not
+ * on a screen from non-administrators. Measured on a fresh site: the app saw 51
+ * fields, an administrator saw 90, and the two Relay fields were only in the
+ * second list. Resolving the app's own field ids therefore reads as the user,
+ * and falls back to the app identity where there is no user to read as.
+ */
+test('the field catalogue is read as the user, and falls back to the app identity', async () => {
+  const typeId = 'ari:cloud:ecosystem::extension/app/env/static/relay-management-state';
+  const asApp = [];
+  const asUser = [];
+  const respond = (hits) => async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      startAt: 0, maxResults: 50, isLast: true, values: hits,
+    }),
+    text: async () => '',
+  });
+
+  const api = createJira({
+    requestJira: async (url) => { asApp.push(String(url)); return respond([])(url); },
+    requestJiraAsUser: async (url) => { asUser.push(String(url)); return respond([{ id: 'customfield_10043', schema: { custom: typeId } }])(url); },
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  const hit = await api.findFieldByModuleType(typeId);
+  assert.equal(hit?.id, 'customfield_10043');
+  assert.equal(asUser.length, 1, 'the user identity must be tried first');
+  assert.equal(asApp.length, 0, 'the app identity must not be used when the user read works');
+
+  const failing = createJira({
+    requestJira: async (url) => { asApp.push(String(url)); return respond([{ id: 'customfield_10043', schema: { custom: typeId } }])(url); },
+    requestJiraAsUser: async () => ({ ok: false, status: 403, json: async () => ({}), text: async () => 'forbidden' }),
+    route: (strings, ...values) => strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), ''),
+  });
+
+  asApp.length = 0;
+  const fallback = await failing.findFieldByModuleType(typeId);
+  assert.equal(fallback?.id, 'customfield_10043', 'a refused user read must fall back, not fail');
+  assert.ok(asApp.length >= 1, 'the app identity must be tried after the user identity is refused');
 });
 
 test('searchIssuesPage uses the enhanced JQL endpoint and preserves cursor pagination', async () => {

@@ -6,7 +6,7 @@ import { buildProjection, isStale, PROJECTION_KEY } from './projection.js';
  * the record (state + commitments).
  *
  * Write order matters. The record is written first (it is the authority), then
- * the projection, then the two fields the workflow condition reads. If a later
+ * the projection, then the two fields that mirror it. If a later
  * write fails, the readers disagree and `decideClosure` and the reconcile
  * report both notice — which is the point. The failure that must never happen
  * is a condition saying "zero" while the record holds live commitments, or
@@ -26,9 +26,12 @@ export async function syncIssue(io, issueKey, { now = new Date(), maxAgeMs = 5 *
   const stale = isStale(existing, ledger, { nowMs: now.getTime(), maxAgeMs });
   const c = counts(ledger, now.getTime());
 
-  // The condition reads the fields, not the projection, so "fresh" has to mean
-  // all three agree. A missing field (null) is not zero and is not a state: it
-  // is written like any other disagreement.
+  // The condition reads the projection; the two fields are the mirror the
+  // console and the reconcile report read back. So "fresh" has to mean all
+  // three agree, `state` included — a projection written before this version has
+  // no state at all, and leaving it alone would leave the condition reading a
+  // property it cannot interpret. A missing field (null) is not zero and is not
+  // a state: it is written like any other disagreement.
   let fieldNow;
   let stateNow;
   try {
@@ -48,6 +51,7 @@ export async function syncIssue(io, issueKey, { now = new Date(), maxAgeMs = 5 *
   if (
     fieldInStep &&
     stateInStep &&
+    existing.state === state &&
     !stale.stale &&
     !existing.guard &&
     existing.open === c.open &&
@@ -83,12 +87,16 @@ export async function syncIssue(io, issueKey, { now = new Date(), maxAgeMs = 5 *
   if (!readBack || readBack.ledgerRev !== ledger.rev) {
     throw new Error('projection_write_unverified');
   }
+  // A null read means the field is not visible to the identity that read it —
+  // Jira hides fields that are on no screen from everyone but an administrator.
+  // The projection was read back above and is what the condition evaluates, so
+  // an invisible mirror is reported and skipped, never treated as a zero.
   const fieldBack = await io.readField(issueKey);
-  if (fieldBack !== c.open) {
+  if (fieldBack !== null && fieldBack !== c.open) {
     throw new Error(`field_write_unverified: expected ${c.open}, read ${String(fieldBack)}`);
   }
   const stateBack = await io.readState(issueKey);
-  if (stateBack !== state) {
+  if (stateBack !== null && stateBack !== state) {
     throw new Error(`state_field_write_unverified: expected ${String(state)}, read ${String(stateBack)}`);
   }
 
@@ -126,8 +134,9 @@ export async function resyncAll(io, issueKeys, opts) {
 /**
  * Fail-closed ordering for the customer portal.
  *
- * The portal condition reads the two fields Relay projects onto the issue. A
- * condition cannot consult the record, so the fields must never say
+ * The portal condition reads the projection Relay writes onto the issue, and
+ * the two fields mirror it. A condition cannot consult the record, so neither
+ * may say
  * "unmanaged" or "zero" while the record holds work. Issue-property writes and
  * record writes live in two different stores with no transaction between them,
  * so Relay orders them deliberately:
@@ -137,7 +146,7 @@ export async function resyncAll(io, issueKeys, opts) {
  *      the record is about to take, carrying the planned open count. A reader at
  *      this instant sees `initializing` and open > 0.
  *   2. Write the record (conditional commit, read back).
- *   3. Write the final projection and the condition fields.
+ *   3. Write the final projection and the mirrored fields.
  *
  * If step 2 or 3 fails, what remains on the issue is the guard: stale, saying
  * `initializing`. That is the safe direction — the portal is blocked until
@@ -172,6 +181,11 @@ export async function writeGuardProjection(io, issueKey, plannedLedger, plannedC
 
   const guard = {
     ...buildProjection(plannedLedger, plannedCounts, now.toISOString()),
+    // The property is what the condition reads now, so the guard has to carry
+    // the withholding state itself. A guard that inherited `unmanaged` from the
+    // planned record would satisfy the condition's first branch while work is
+    // being written — the one direction this whole ordering exists to prevent.
+    state: INITIALIZING,
     guard: true,
   };
   await io.writeProjection(issueKey, guard);
@@ -186,13 +200,13 @@ export async function writeGuardProjection(io, issueKey, plannedLedger, plannedC
   if (!stateBlocking) {
     await io.writeState(issueKey, INITIALIZING);
     const stateBack = await io.readState(issueKey);
-    if (stateBack !== INITIALIZING) throw new Error('guard_state_write_unverified');
+    if (stateBack !== null && stateBack !== INITIALIZING) throw new Error('guard_state_write_unverified');
   }
 
-  // The same number goes into the count field, because the condition reads it.
+  // The same number goes into the count field, because the console reads it back.
   await io.writeField(issueKey, plannedCounts.open);
   const fieldBack = await io.readField(issueKey);
-  if (!(typeof fieldBack === 'number' && fieldBack > 0)) {
+  if (fieldBack !== null && !(typeof fieldBack === 'number' && fieldBack > 0)) {
     throw new Error('guard_field_write_unverified');
   }
 

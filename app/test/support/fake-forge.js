@@ -389,7 +389,13 @@ export function createFakeJira({
         const ignored = target === fields.count ? state.fieldIgnored : state.stateFieldIgnored;
         if (ignored) return { status: 204, accepted: true };
         const store = target === fields.count ? values.count : values.state;
-        store.set(Number(issueId), value);
+        // `fieldMismatch` models Jira storing something other than what was
+        // written: the read-back succeeds and disagrees, which must stay a hard
+        // failure — unlike an unreadable field, which is only a mirror gap.
+        const stored = state.fieldMismatch
+          ? (typeof value === 'number' ? value + 1 : `${String(value)}-mismatch`)
+          : value;
+        store.set(Number(issueId), stored);
         return { status: 204, accepted: true };
       },
       async readField(key, fieldIdArg) {

@@ -94,7 +94,7 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
         return describeField(which, { id: null, key: null, typeId });
       }
     }
-    if (!found?.id) return describeField(which, { id: null, key: null, typeId });
+    if (!found?.id) return describeField(which, { id: null, key: null, typeId, seen: found?.seen ?? null, appOwned: found?.appOwned ?? null });
 
     const resolvedAt = now().toISOString();
     const patch = { [`${cachePrefix}Id`]: found.id, [`${cachePrefix}Key`]: found.key ?? null, [`${cachePrefix}TypeId`]: typeId, [`${cachePrefix}ResolvedAt`]: resolvedAt };
@@ -434,9 +434,15 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
       try {
         await io.writeState(key, INITIALIZING);
         const stateBack = await io.readState(key);
-        if (stateBack !== INITIALIZING) {
+        // A null read means the field is not visible to whichever identity
+        // read it, not that the write was refused: on this site the field is
+        // on no screen, so Jira hides it from everyone but an administrator.
+        // The projection carries enforcement, and it was verified separately,
+        // so an invisible mirror is a diagnostic rather than a dead end.
+        if (stateBack !== null && stateBack !== INITIALIZING) {
           throw new Error(`state field did not accept "initializing" (read ${String(stateBack)})`);
         }
+        if (stateBack === null) log({ event: 'field_mirror_unreadable', which: 'state', key, expected: INITIALIZING });
       } catch (err) {
         throw new LifecycleError('state_field', String(err?.message ?? err));
       }
@@ -476,7 +482,8 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
       try {
         await io.writeState(key, MANAGED);
         const managedBack = await io.readState(key);
-        if (managedBack !== MANAGED) throw new Error(`state field did not accept "managed" (read ${String(managedBack)})`);
+        if (managedBack !== null && managedBack !== MANAGED) throw new Error(`state field did not accept "managed" (read ${String(managedBack)})`);
+        if (managedBack === null) log({ event: 'field_mirror_unreadable', which: 'state', key, expected: MANAGED });
       } catch (err) {
         throw new LifecycleError('state_field', String(err?.message ?? err));
       }
@@ -587,7 +594,8 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
     try {
       await io.writeState(key, INITIALIZING);
       const back1 = await io.readState(key);
-      if (back1 !== INITIALIZING) throw new LifecycleError('state_field', `state field did not accept "initializing" (read ${String(back1)})`);
+      if (back1 !== null && back1 !== INITIALIZING) throw new LifecycleError('state_field', `state field did not accept "initializing" (read ${String(back1)})`);
+      if (back1 === null) log({ event: 'field_mirror_unreadable', which: 'state', key, expected: INITIALIZING });
       step('state_field_initializing');
 
       await store.setState(key, INITIALIZING, { attempts: 3 });
@@ -598,7 +606,8 @@ export function createHandlers({ jira, storage, records, now = () => new Date(),
 
       await io.writeState(key, UNMANAGED);
       const back2 = await io.readState(key);
-      if (back2 !== UNMANAGED) throw new LifecycleError('state_field', `state field did not accept "unmanaged" (read ${String(back2)})`);
+      if (back2 !== null && back2 !== UNMANAGED) throw new LifecycleError('state_field', `state field did not accept "unmanaged" (read ${String(back2)})`);
+      if (back2 === null) log({ event: 'field_mirror_unreadable', which: 'state', key, expected: UNMANAGED });
       step('state_field_unmanaged');
 
       await store.untrack(key);
